@@ -10,17 +10,16 @@ output:
     df_print: paged
 ---
 
-```{r}
+```{r setup_libs, include=FALSE, message=FALSE, warning=FALSE}
+# Load core packages (quiet)
 suppressPackageStartupMessages({
   library(Seurat)
   library(sctransform)
   library(glmGamPoi)
-  # library(rgl)
   library(patchwork)
-  # library(DoubletFinder)
   library(ggrepel)
   library(ggpubr)
-  library(dplyr) 
+  library(dplyr)
   library(stringr)
   library(purrr)
   library(readr)
@@ -28,35 +27,10 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(tidyr)
   library(cowplot)
-  # library(scDblFinder)
-  library(SeuratData)
-  library(SeuratDisk)
-  library(plotly)
-  library(Hmisc)
-  library(rmarkdown)
-  library(RColorBrewer)
-  # library(Platypus)
-  library(ggvenn)
   library(conflicted)
-  # library(SoupX)
-  library(MetBrewer)
-  library(ggh4x)
   library(SingleCellExperiment)
-  # library(scmap)
-  # library(ggsankey)
-  # library(findPC)
-  library(BPCells)
-  # library(furrr)
-  # library(future.batchtools)
   library(parallel)
-  library(EnhancedVolcano)
-  library(DropletUtils)
   library(ggforce)
-  library(scran)
-  library(SingleR)
-  library(scDblFinder)
-  library(ggsankey)
-  library(findPC)
   
   conflict_prefer("select", "dplyr")
   conflict_prefer("filter", "dplyr")
@@ -70,15 +44,46 @@ suppressPackageStartupMessages({
   conflicts_prefer(dplyr::desc)
   conflicts_prefer(dplyr::count)
 })
+
+
 ```
 
+```{r setup_libs, include=FALSE, message=FALSE, warning=FALSE}
+## Helper functions to reduce redundancy and improve reproducibility
+# get_umap_mdata: attach UMAP embeddings to meta.data for a list of Seurat objects
+get_umap_mdata <- function(seu_list) {
+  map(seu_list, ~{
+    .x@meta.data %>%
+      rownames_to_column("bcode") %>%
+      left_join(., .x@reductions$umap@cell.embeddings %>% as.data.frame() %>% rownames_to_column("bcode"), by = "bcode")
+  })
+}
 
+## read_seurat_objs: read matching files and return list for requested samples
+read_seurat_objs <- function(glob_pattern, samples) {
+  files <- Sys.glob(glob_pattern)
+  files %>%
+    set_names(nm = (str_remove_all(., 'data/processed/Pf/|/seu_obj.*'))) %>%
+    unlist(recursive = FALSE) %>%
+    { .[samples] } %>%
+    { .[!is.na(.)] } %>%
+    map(readRDS)
+}
+
+## normalize_to_RNA: set `RNA` assay and call `NormalizeData()` for each object
+normalize_to_RNA <- function(seu_list) {
+  map(seu_list, ~{
+    DefaultAssay(.x) <- "RNA"
+    NormalizeData(.x)
+  })
+}
+```
 
 # MSC stage annotation and gene expression QC 
 
 ## setup, read input files and exploratory visualizations and general functions
 
-```{r, setup}
+```{r, setup, include=FALSE}
 knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh')
 
 ```
@@ -88,10 +93,13 @@ knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr
 
 #### Source common functions, variables and tables
 ```{r}
-##Boxplot labeling function
+## Load project-specific helper scripts and shared variables
+## Boxplot labeling and project helper functions
 source("~/Talleh_code/pf_common_vars.R")
 source("~/Talleh_code/project_common_fns.R")
 ```
+
+<!-- Helpers and shared variables are defined above; the following loads project-specific globals. -->
 
 ## Read in sample name details
 
@@ -103,7 +111,7 @@ sample_name <- c("MSC49", "MSC68")
 
 
 ```{r, eval=T}
-##Read annotated seurat object
+# Read annotated Seurat objects (prelim stage) for the selected samples
 bp_prelim_stg <- list.files("data/processed/Pf", pattern = "bp_prelim_stg.RDS$", full.names = T, recursive = T, include.dirs = T) %>% 
   set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|bp_prelim_stg.*.RDS'))) %>% 
   .[sample_name] %>%
@@ -112,6 +120,7 @@ bp_prelim_stg <- list.files("data/processed/Pf", pattern = "bp_prelim_stg.RDS$",
 
 
 ```{r, eval=T}
+# Run SCT preprocessing wrapper on each object (saves results in list)
 all_seu_prelim_stg_sct <- map(bp_prelim_stg, ~sct_run_fn(Seurat_object = .x))
 all_seu_prelim_stg_sct
 ```
@@ -119,17 +128,15 @@ all_seu_prelim_stg_sct
 
 
 ```{r, warning=FALSE, message=FALSE}
-imap(all_seu_prelim_stg_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1, reduction = "pca")+ scale_color_manual(values = sp_col_new) + labs(title = .y))
-imap(all_seu_prelim_stg_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))
+# Quick PCA plots coloured by stage for SCT objects (visual check)
+imap(all_seu_prelim_stg_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1, reduction = "pca") + scale_color_manual(values = sp_col_new) + labs(title = .y))
+imap(all_seu_prelim_stg_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1) + scale_color_manual(values = sp_col_new) + labs(title = .y))
 ```
 
 ```{r, warning=FALSE, message=FALSE}
 
-all_seu_prelim_stg_sct_umap_mdata <- map(all_seu_prelim_stg_sct, ~{
-  .x@meta.data %>% 
-    rownames_to_column("bcode") %>%
-    left_join(., .x@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column("bcode"), by = "bcode")
-})
+## Extract UMAP embeddings into metadata frame for plotting/export
+all_seu_prelim_stg_sct_umap_mdata <- get_umap_mdata(all_seu_prelim_stg_sct)
 
 ```
 
@@ -141,36 +148,20 @@ saveRDS(all_seu_prelim_stg_sct_umap_mdata, "data/processed/Pf/m2_all/all_seu_pre
 ```
 
 ```{r, message=F, warning=F, eval=T}
-## Get mdata file list
-all_seu_prelim_stg_norm_list_files <- Sys.glob("data/processed/Pf/*/seu_obj/bp_prelim_stg_norm.RDS")
-
-all_seu_prelim_stg_norm_list_files
+# Read normalized prelim-stage Seurat objects (if present) for the selected samples
+all_seu_prelim_stg_norm <- read_seurat_objs("data/processed/Pf/*/seu_obj/bp_prelim_stg_norm.RDS", sample_name)
 ```
-
-```{r, message=F, warning=F, eval=T}
-## read filtered barcodes
-all_seu_prelim_stg_norm <- map(all_seu_prelim_stg_norm_list_files, ~.x %>% 
-                                 set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj.*')))) %>% 
-  unlist(., recursive = F) %>% 
-  .[sample_name] %>%
-  .[!is.na(.)] %>%
-  map(readRDS) 
-
-```
-
 
 ```{r, warning=FALSE, message=FALSE}
-imap(all_seu_prelim_stg_norm, ~DimPlot(.x, dims = c(2,3), group.by = "stage_fld", pt.size = 0.1, reduction = "pca")+ scale_color_manual(values = sp_col_new) + labs(title = .y))
-imap(all_seu_prelim_stg_norm, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))
+# Diagnostic PCA/UMAP plots for normalized objects
+imap(all_seu_prelim_stg_norm, ~DimPlot(.x, dims = c(2,3), group.by = "stage_fld", pt.size = 0.1, reduction = "pca") + scale_color_manual(values = sp_col_new) + labs(title = .y))
+imap(all_seu_prelim_stg_norm, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1) + scale_color_manual(values = sp_col_new) + labs(title = .y))
 ```
 
 ```{r, warning=FALSE, message=FALSE}
 
-all_seu_prelim_stg_norm_umap_mdata <- map(all_seu_prelim_stg_norm, ~{
-  .x@meta.data %>% 
-    rownames_to_column("bcode") %>%
-    left_join(., .x@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column("bcode"), by = "bcode")
-})
+## Extract UMAP embeddings for normalized objects
+all_seu_prelim_stg_norm_umap_mdata <- get_umap_mdata(all_seu_prelim_stg_norm)
 ```
 
 
@@ -182,17 +173,12 @@ saveRDS(all_seu_prelim_stg_norm_umap_mdata, "data/processed/Pf/m2_all/all_seu_pr
 
 
 ```{r, warning=FALSE, message=FALSE, fig.width=12, fig.height=3.5}
-## swap sct for norm standardisation
-all_seu_prelim_stg_norm <- all_seu_prelim_stg_sct
-
-for (i in 1:length(all_seu_prelim_stg_norm)) {
-  DefaultAssay(all_seu_prelim_stg_norm[[i]]) <- "RNA"
-  all_seu_prelim_stg_norm[[i]] <- NormalizeData(all_seu_prelim_stg_norm[[i]])
-}
+# If normalized versions are not available, derive them from SCT objects
+all_seu_prelim_stg_norm <- normalize_to_RNA(all_seu_prelim_stg_sct)
 ```
 
 ```{r, warning=FALSE, message=FALSE, fig.width=12, fig.height=3.5}
-#SURF1.2 gexp02
+# Example marker gene feature plots (UMAP)
 imap(all_seu_prelim_stg_norm, ~FeaturePlot(.x, reduction = "umap",  label = T, features = c("PF3D7-0113600", "PF3D7-1102500", "PF3D7-1222600"), order = T, ncol = 3) + labs(title = .y))
 ```
 
@@ -230,17 +216,6 @@ plot_grid(plotlist = plts_stg, ncol = 4)
 
 ## 1. MITOCHONDRIAL PERCENT VISUALIZATION AND CELL REMOVAL
 
-## !!!!!!NB - RECONSIDER FILTRATION PROPERLY LATER
-```{r, eval=FALSE}
-## !!!!!!NB -CONSIDER FORE REMOVAL LATER
-#filter out cells with high ncountRNA 
-# all_seu_prelim_stg_norm <- all_seu_prelim_stg_norm %>%
-#   map2(., ncount_filt, ~.x  %>%
-#          subset(., pf_umi_count < .y )
-#   )
-
-```
-
 Get mt_filt based on automatic removal of quantiles
 ```{r}
 all_seu_prelim_stg_norm <- all_seu_prelim_stg_norm%>% 
@@ -249,6 +224,7 @@ all_seu_prelim_stg_norm <- all_seu_prelim_stg_norm%>%
     mit_fts <- rownames(.x)[str_detect(rownames(.x), "MIT")]
     api_fts <- rownames(.x)[str_detect(rownames(.x), "API")]
     
+    # Compute mitochondrial and apicoplast percent features and add to metadata
     .x %>% PercentageFeatureSet(., features = mit_fts, col.name = 'percent.mt', assay = "RNA") %>%
       PercentageFeatureSet(., features = api_fts, col.name = 'percent.api', assay = "RNA") 
   })
@@ -256,10 +232,8 @@ all_seu_prelim_stg_norm <- all_seu_prelim_stg_norm%>%
 ```
 
 ```{r}
-# mt_filt <- unlist(map(all_seu_prelim_stg_norm, ~quantile(.x@meta.data[, "percent.mt"], 0.975, na.rm = T)))
+## Determine mt% cutoff per sample (99.5th percentile) to flag high-mt cells
 mt_filt <- unlist(map(all_seu_prelim_stg_norm, ~quantile(.x@meta.data[, "percent.mt"], 0.995, na.rm = T)))
-# api_filt <- unlist(map(all_seu_prelim_stg_norm, ~quantile(.x@meta.data[, "percent.api"], 0.995, na.rm = T)))
-
 ```
 
 
@@ -273,6 +247,7 @@ std_theme <- theme(axis.text=element_text(size=18),
 ```
 
 ```{r, results='asis'}
+## Plot UMI count vs percent.mt with per-sample mt cutoff line
 pmap(list(all_seu_prelim_stg_norm, mt_filt, names(all_seu_prelim_stg_norm)), ~{
   FeatureScatter(..1, feature1 = "pf_umi_count", feature2 = "percent.mt", group.by = "stage_fld", pt.size = 0.1)+ 
     scale_color_manual(values = sp_col_new) +
@@ -297,61 +272,22 @@ after_umi100_filt
 map2(all_seu_prelim_stg_norm, mt_filt, ~.@meta.data %>% dplyr::count(percent.mt>.y ))
 ```
 
-######## !!!!!!NB - RECONSIDER FILTRATION PROPERLY LATER
-
 ```{r}
 ## Barcodes removed
 mt_filt_rm_bcodes <- map2(all_seu_prelim_stg_norm, mt_filt, ~colnames(subset(.x, percent.mt < .y, invert = T ) ))
 
 ```
 
-## Compare the original sct object that was shared with talleh to the new seurat object that was created with the same counts and meta.data but with the new stage annotations to check that the stage annotations are the same between the two objects
-
-
 ```{r, eval=T}
-## Generated in ~/mali22_code_lnk/for_talleh_mapping_analysis/m2_prelim_stg_annotn_ta19.Rmd
-msc49_ta19 <- readRDS("data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
-```
-
-```{r, eval=T}
-all_seu_prelim_stg_norm[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = percent.mt_nw, percent.mt_old, color = stage_fld)) + geom_point() + geom_abline()
-```
-
-```{r, eval=T}
-# DefaultAssay(msc49_ta19) <- "RNA"
-msc49_ta19 <- PercentageFeatureSet(msc49_ta19, features = rownames(msc49_ta19)[str_detect(rownames(msc49_ta19), "MIT")], col.name = 'percent.mt_rna', assay = "RNA")
-```
-
-```{r, eval=T}
-msc49_ta19@meta.data %>% ggplot(aes(x = nCount_RNA, pf_umi_count)) + geom_point() + geom_abline()
-msc49_ta19@meta.data %>% ggplot(aes(x = percent.mt, percent.mt_rna)) + geom_point() + geom_abline()
-```
-
-```{r, eval=T}
-all_seu_prelim_stg_norm[["MSC49"]]@meta.data %>% ggplot(aes(x = nCount_RNA, pf_umi_count)) + geom_point() + geom_abline()
+## write out object with mitochondrial percent count for comparison with older iteration of other same datasets
+imap(all_seu_prelim_stg_norm, ~saveRDS(.x, paste0("data/processed/Pf/",.y, "/seu_obj/seu_prelim_stg_norm_for_comp_b4_pct_mito_filt.RDS")))
 
 ```
 
-```{r, eval=T}
-all_seu_prelim_stg_norm[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = percent.mt_nw, percent.mt_rna, color = stage_fld)) + geom_point(size = 0.01) + geom_abline()
-```
 
 ```{r, eval=T}
-all_seu_prelim_stg_norm[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = nFeature_RNA_nw, nFeature_RNA_old, color = stage_fld)) + geom_point() + geom_abline()
-```
-
-```{r, eval=T}
-FetchData(all_seu_prelim_stg_norm[["MSC49"]], vars = "PF3D7-MIT02100", layer = "counts") %>% rownames_to_column("bcode") %>% right_join(., FetchData(msc49_ta19, vars = "PF3D7-MIT02100", layer = "counts") %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = `PF3D7-MIT02100_nw`, `PF3D7-MIT02100_old`)) + geom_point() + geom_abline()
-
-```
-
-```{r, eval=T}
-all_seu_prelim_stg_norm[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = pf_umi_count_nw, pf_umi_count_old, color = stage_fld)) + geom_point() + geom_abline()
-```
-
-```{r, eval=T}
-## !!!!!!NB -CONSIDER FORE REMOVAL LATER
-#filter out cells with high mitochondrial count
+## Optionally remove cells exceeding the per-sample mitochondrial cutoff (mt_filt)
+## This step drops cells with percent.mt >= the sample-specific threshold
 all_seu_prelim_stg_norm <- all_seu_prelim_stg_norm %>%
   map2(., mt_filt, ~.x  %>%
          subset(., percent.mt < .y )
@@ -360,22 +296,17 @@ all_seu_prelim_stg_norm <- all_seu_prelim_stg_norm %>%
 ```
 
 ```{r, eval=T}
+## write out object with mitochondrial percent count for comparison with older iteration of other same datasets
+imap(all_seu_prelim_stg_norm, ~saveRDS(.x, paste0("data/processed/Pf/",.y, "/seu_obj/seu_prelim_stg_norm_for_comp_after_pct_mito_filt.RDS")))
 
+```
+
+```{r, eval=T}
+
+## Report cell counts remaining after mt filtering
 after_mt_filt <- map(all_seu_prelim_stg_norm, dim)%>% as.data.frame() %>% .[2,]
 after_mt_filt
 ```
-
-
-```{r, eval=T}
-all_seu_prelim_stg_norm[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
-```
-
-
-```{r, eval=T}
-all_seu_ta_mt_filt_missing_subset <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_seu_prelim_stg_norm[["MSC49"]]))]
-all_seu_ta_mt_filt_missing_subset
-```
-
 
 
 ```{r, warning=FALSE, message=FALSE}
@@ -385,17 +316,10 @@ imap(all_seu_prelim_stg_norm, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld"
 
 
 ```{r, warning=FALSE, message=FALSE}
-imap(all_seu_prelim_stg_norm, ~VlnPlot(.x, features = "pf_gn_count", group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))
-```
-
-
-```{r, warning=FALSE, message=FALSE}
 imap(all_seu_prelim_stg_norm, ~VlnPlot(.x, features = "nFeature_RNA", group.by = "stage_fld", pt.size = 0.1) + scale_color_manual(values = sp_col_new) + scale_y_log10() +  labs(title = .y))
 ```
 
-```{r, warning=FALSE, message=FALSE}
-# imap(all_seu_prelim_stg_norm, ~VlnPlot(.x, features = "sim_lab1_mca", group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))
-```
+
 ### 2.1 GENE UMI COUNT VISUALIZATIONS
 
 ```{r, fig.height = 3.5, fig.width = 12}
@@ -429,15 +353,7 @@ plot_grid(plotlist = plts_nc, ncol = 4)
 ```
 
 
-```{r, warning=FALSE, message=FALSE, fig.width=16, fig.height=4}
-imap(all_seu_prelim_stg_norm, ~DimPlot(.x, label = T, group.by = c("stage_fld", "seurat_clusters"), ncol = 3) + 
-       labs(title = .y) )
-
-```
-
-
 ```{r, warning=FALSE, message=FALSE, fig.width=4, fig.height=4.5}
-## in cellbender but not in edrops
 plts_l100 <- imap(all_seu_prelim_stg_norm, possibly(~DimPlot(.x, label = T, cells.highlight =  colnames(.x[,.x@meta.data$pf_gn_count <100]), sizes.highlight = 0.05) + 
                                                       theme_void() + theme(legend.position = "none", panel.border = element_rect(color = "black", fill = NA, size = 1)) +
                                                       labs(title = .y), "no cells"))
@@ -449,8 +365,6 @@ plot_grid(plotlist = plts_l100, ncol = 4)
 ```
 
 
-
-
 ## 2. CELLBENDER METRICS CELL VISUALIZATIONS
 
 
@@ -460,6 +374,7 @@ plot_grid(plotlist = plts_l100, ncol = 4)
 
 ```{r, warning=FALSE, message=FALSE, fig.width=4, fig.height=4.5}
 ## in cellbender but not in edrops
+## Highlight cells with low CellBender probability (< 0.9)
 plts_seu_cp9 <- imap(all_seu_prelim_stg_norm, possibly(~DimPlot(.x, label = T, cells.highlight =  colnames(.x[ , .x@meta.data$cell_probability < 0.9]), sizes.highlight = 0.05) + theme_void() + theme(legend.position = "none", panel.border = element_rect(color = "black", fill = NA, size = 1))  + labs(title = .y), "no cells"))
 
 ```
@@ -475,6 +390,7 @@ plot_grid(plotlist = plts_seu_cp9, ncol = 4)
 
 ## Assess cellbender estimated metrics cell probability and background fraction
 ```{r, fig.height = 3.5, fig.width = 12}
+## Visualise estimated background fraction from CellBender by method and donor
 all_seu_prelim_stg_norm_mdata_mrg %>%
   ggplot(aes(x = mthds_union, y = background_fraction)) +
   geom_boxplot() +
@@ -485,6 +401,7 @@ all_seu_prelim_stg_norm_mdata_mrg %>%
 
 
 ```{r, fig.height = 3.5, fig.width = 15}
+## Scatter of gene count vs background fraction (check extreme cells)
 all_seu_prelim_stg_norm_mdata_mrg %>%
   ggplot(aes(x = pf_gn_count, y = background_fraction, colour = mthds_union)) +
   geom_point(size = 0.01) +
@@ -506,6 +423,7 @@ all_seu_prelim_stg_norm_mdata_mrg %>% count(donor, background_fraction> 0.5 )
 
 ```{r, warning=FALSE, message=FALSE, fig.width=4, fig.height=4.5}
 ## 
+## Highlight cells with high estimated background fraction (> 0.5)
 plts_seu_bg5 <- imap(all_seu_prelim_stg_norm, possibly(~DimPlot(.x, label = T, cells.highlight =  colnames(.x[, .x@meta.data$background_fraction > 0.5 ]), sizes.highlight = 0.05) + theme_void() + theme(legend.position = "none", panel.border = element_rect(color = "black", fill = NA, size = 1))  +
                                                          labs(title = .y), "no cells"))
 
@@ -537,13 +455,51 @@ plot_grid(plotlist = plts_cbg, ncol = 4)
 
 ### 4 UMI AND GENE COUNTS OUTLIERS VISUALIZATIONS AND REMOVAL
 
+#### 4.1 GENE UMI COUNT VISUALIZATIONS
 
+```{r, fig.height = 3.5, fig.width = 12}
+all_seu_prelim_stg_norm_mdata_mrg %>%
+  ggplot(aes(x = log10(pf_gn_count), y = log10(pf_umi_count), colour = mthds_union)) +
+  geom_point(size = 0.01) +
+  geom_abline() +
+  facet_wrap(donor ~., nrow = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(color = guide_legend(title = 'Call methods', override.aes = list(size = 4), ncol = 1))
+
+```
+
+
+
+```{r, warning=FALSE, message=FALSE, fig.width=4, fig.height=4.5}
+## umi
+plts_nc <- imap(all_seu_prelim_stg_norm, possibly(~FeaturePlot(.x, label = T, features = "pf_umi_count") +  theme_void() + theme(legend.position = "none") + labs(title = .y), "no cells"))
+
+```
+
+```{r, warning=FALSE, message=FALSE, fig.height= 3.5, fig.width= 10, eval=T}
+plot_grid(plotlist = plts_nc, ncol = 4)
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.width=4, fig.height=4.5}
+plts_l100 <- imap(all_seu_prelim_stg_norm, possibly(~DimPlot(.x, label = T, cells.highlight =  colnames(.x[,.x@meta.data$pf_gn_count <100]), sizes.highlight = 0.05) + 
+                                                      theme_void() + theme(legend.position = "none", panel.border = element_rect(color = "black", fill = NA, size = 1)) +
+                                                      labs(title = .y), "no cells"))
+
+```
+
+```{r, warning=FALSE, message=FALSE, fig.height= 3.5, fig.width= 10, eval=T}
+plot_grid(plotlist = plts_l100, ncol = 4)
+```
+
+#### 4.2 Remove outliers
 ########################### START Remove outliers ##############################
 
 ```{r}
+# Compute stage- and cluster-level quantile cutoffs for outlier detection
+# (used to add metadata cutoffs per cell)
 # gn_uc <- c(1900, 2600, 3300, 3800, 3200)
 # gn_lc <- c(250, 250, 250, 300, 250)
-# all_seu_prelim_stg_norm <- pmap(list(all_seu_prelim_stg_norm, rep('pf_gn_count', length(sample_name)), rep('pf_umi_count', length(sample_name))), ~{
 all_seu_prelim_stg_norm <- pmap(list(all_seu_prelim_stg_norm, rep('nFeature_RNA', length(sample_name)), rep('nCount_RNA', length(sample_name))), ~{
   ..1@meta.data %>%
     rownames_to_column('bcode') %>%
@@ -594,12 +550,12 @@ fct_theme <- theme(text=element_text(size=14),
                    legend.title = element_text(size=20,face="bold"),
                    strip.text =element_text(size=22,face="plain", colour = 'black'))
 
-
 ```
 
 
 ```{r, fig.height = 4.5, fig.width = 12}
 
+## Prepare combined metadata table with donor IDs for violin plots
 md_don_cl <- map(all_seu_prelim_stg_norm, ~.@meta.data #%>% 
                  # mutate(across(c(sim_lab1, sim_lab2), as.numeric))
 ) %>% 
@@ -609,7 +565,7 @@ md_don_cl <- map(all_seu_prelim_stg_norm, ~.@meta.data #%>%
 ```
 
 ```{r, fig.height = 8, fig.width = 12}
-
+## Violin plotting helper: QC visualisation per cluster/stage
 my21_qc_vln_fn <- function(clust_var = "StagePrelimC", clust_cols, ci_sufx = "_stg", row_numbers = 2) {
   pmap(list(c('pf_umi_count', 'pf_gn_count'), c('Transcript', 'Gene'), paste0(c("rna_lci_cl","gn_lci_cl"), ci_sufx), paste0(c("rna_uci_cl","gn_uci_cl"), ci_sufx)), ~{
     
@@ -632,7 +588,6 @@ my21_qc_vln_fn <- function(clust_var = "StagePrelimC", clust_cols, ci_sufx = "_s
       guides(color = guide_legend(title = 'Cluster',override.aes = list(size = 4), nrow = 1))
   })
 }
-
 
 ```
 
@@ -661,7 +616,6 @@ my21_qc_vln_fn(clust_var = "seurat_clusters", clust_cols = cluster_cols, ci_sufx
 
 
 ```{r, warning=FALSE, message=FALSE, fig.width=4, fig.height=4.5}
-## 
 plts_outlrs <- imap(all_seu_prelim_stg_norm, possibly(~{
   DimPlot(.x, label = T, 
           cells.highlight =  .x@meta.data %>% rownames_to_column('bcode') %>% filter(nFeature_RNA<gn_lci_cl_seu | nCount_RNA < rna_lci_cl_seu | nCount_RNA > rna_uci_cl_seu | nFeature_RNA > gn_uci_cl_seu)  %>% pull(bcode), 
@@ -709,48 +663,42 @@ Remove those with too few genes transcripts
 Remove those with too few genes transcripts
 
 ```{r}
-
 after_mt_filt <- map(all_seu_prelim_stg_norm, dim)%>% as.data.frame() %>% .[2,]
 after_mt_filt
 ```
 ## 3.1  OUTLIER REMOVALS
-Check the number of lost cells from original talleh dataset before outlier removal
-```{r, eval=T}
-all_seu_ta_mt_filt_missing_subset_b4OutlierRm <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_seu_prelim_stg_norm[["MSC49"]]))]
-all_seu_ta_mt_filt_missing_subset_b4OutlierRm
-```
 
 ```{r}
-## Barcodes removed
+## Identify barcodes failing the gene/UMI thresholds (for reporting)
 low_count_rm_bcodes <- map(all_seu_prelim_stg_norm, ~colnames(subset(.x, nFeature_RNA > gn_lci_cl_seu & nCount_RNA > rna_lci_cl_seu & nCount_RNA < rna_uci_cl_seu & nFeature_RNA < gn_uci_cl_seu, invert = T)))
 
 ```
 
 ```{r}
 
-## filter based on gene/transcript count
+## Apply per-cluster/stage gene and UMI cutoffs to filter out outliers
 all_seu_filtOlMtCb <- map(all_seu_prelim_stg_norm, ~subset(.x, nFeature_RNA > gn_lci_cl_seu & nCount_RNA > rna_lci_cl_seu & nCount_RNA < rna_uci_cl_seu & nFeature_RNA < gn_uci_cl_seu))
 
 aftr_low_count_rm <- map(all_seu_filtOlMtCb, dim)%>% as.data.frame() %>% .[2,]
 aftr_low_count_rm
 
 ```
-Check the number of lost cells from original talleh dataset after outlier removal
+
+save to check lost cells from original talleh dataset after outlier removal
+
 ```{r, eval=T}
-all_seu_ta_mt_filt_missing_subset_afterOutlierRm <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_seu_filtOlMtCb[["MSC49"]]))]
-all_seu_ta_mt_filt_missing_subset_afterOutlierRm
+imap(all_seu_filtOlMtCb, ~saveRDS(.x, paste0("data/processed/Pf/", .y,"/seu_obj/all_seu_filtOlMtCb_after_outlier_rm_b4_cbenderqc.RDS")))
+
 ```
 
 ## 3.1  CELL PROBABILITY REMOVALS
 
 ```{r}
-## 
 map(all_seu_filtOlMtCb, ~.x@meta.data %>% count(cell_probability >= 0.9))
 ```
 
 
 ```{r}
-## 
 imap(all_seu_filtOlMtCb, ~.x@meta.data %>% count((cell_probability >= 0.9), stage_fld))
 
 ```
@@ -762,7 +710,6 @@ cell_prob9_rm_bcodes <- map(all_seu_filtOlMtCb, possibly(~colnames(subset(.x, ce
 ```
 
 ```{r}
-## 
 all_seu_filtOlMtCb <- map(all_seu_filtOlMtCb, ~subset(.x, cell_probability >= 0.9))
 
 
@@ -775,13 +722,11 @@ aftr_cell_prob9_rm
 
 
 ```{r, warning=FALSE, message=FALSE, fig.width=4, fig.height=4.5}
-## 
 map(all_seu_filtOlMtCb, ~.x@meta.data %>% count(background_fraction > 0.5  ))
 
 ```
 
 ```{r}
-## 
 map(all_seu_filtOlMtCb, ~.x@meta.data %>% count(background_fraction <= 0.5))
 
 ```
@@ -825,7 +770,6 @@ cb_bg_frac_rm_bcodes <- map(all_seu_filtOlMtCb,
 
 
 ```{r}
-# 
 all_seu_filtOlMtCb <- map(all_seu_filtOlMtCb, 
                           ~.x[, (.x@meta.data$background_fraction <= 0.5 )]
 )
@@ -865,6 +809,7 @@ imap(all_seu_filtOlMtCb, ~saveRDS(.x, paste0("data/processed/Pf/", .y,"/seu_obj/
 
 ```{r}
 
+## Compile cell counts after each filtering step for summary and plotting
 filt_flow <- list(after_umi100_filt, after_mt_filt, aftr_low_count_rm,  aftr_cell_prob9_rm, aftr_cb_bg_frac_rm) %>% set_names("100umi_filt", "mt_filt", "low_count",  "cell_prob9", "cb_bg_frac") %>% bind_rows(., .id = "filt_metric") %>% mutate(across(filt_metric, ~factor(., levels = c("100umi_filt", "mt_filt", "low_count",  "cell_prob9", "cb_bg_frac"))))
 
 ```
@@ -899,6 +844,7 @@ filt_flow_diff_t
 
 
 ```{r}
+## Save filter-flow summary table for record-keeping
 # saveRDS(filt_flow_diff_t, "data/processed/Pf/m2_all/filt_flow_diff_t.RDS")
 saveRDS(filt_flow_diff_t, "data/processed/Pf/m2_all/filt_flow_diff_t.RDS") 
 
@@ -914,6 +860,7 @@ filt_flow %>%
 
 
 ```{r}
+## Aggregate lists of removed barcodes by filter for downstream plotting/saving
 poorcellQC_bcodes_rm <- list(mt_filt_rm_bcodes, low_count_rm_bcodes, cell_prob9_rm_bcodes, cb_bg_frac_rm_bcodes) %>% 
   set_names(c("mt_filt_rm_bcodes", "low_count_rm_bcodes", "cell_prob9_rm_bcodes", "cb_bg_frac_rm_bcodes"))
 
@@ -928,11 +875,8 @@ saveRDS(poorcellQC_bcodes_rm, "data/processed/Pf/m2_all/lowQC_rm_plotting/poorce
 !!!NOTE - If the below breaks the code then just remove and rerun. I added it but didn't rerun
 ```{r, warning=FALSE, message=FALSE}
 
-all_seu_filtOlMtCb_umap_mdata <- map(all_seu_filtOlMtCb, ~{
-  .x@meta.data %>% 
-    rownames_to_column("bcode") %>%
-    left_join(., .x@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column("bcode"), by = "bcode")
-})
+# UMAP + metadata for filtered objects
+all_seu_filtOlMtCb_umap_mdata <- get_umap_mdata(all_seu_filtOlMtCb)
 ```
 
 
@@ -942,23 +886,3 @@ saveRDS(all_seu_filtOlMtCb_umap_mdata, "data/processed/Pf/m2_all/lowQC_rm_plotti
 
 ```
 
-```{r, eval=T}
-all_seu_filtOlMtCb[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% left_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
-
-all_seu_filtOlMtCb[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
-```
-
-
-```{r, eval=T}
-all_seu_ta_missing_subset <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_seu_filtOlMtCb[["MSC49"]]))]
-
-```
-
-
-```{r, eval=T}
-all_seu_ta_missing_subset 
-```
-
-```{r}
-msc49_ta19@meta.data %>% count(scrub_doublet, scf_class_norm, scf_class_rand)
-```

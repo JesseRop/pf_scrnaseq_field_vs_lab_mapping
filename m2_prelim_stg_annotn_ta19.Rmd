@@ -55,26 +55,9 @@ knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr
 
 ```
 
-### Variable declarations
-
-```{r}
-##colors
-sp_col_new <- c(`Late ring` = "#78C679", `Early trophozoite` = "#FEEEAA", `Female (LE)` = "#a97f2f", 
-                Female = "#551A8B", `Male (LE)` = "#7e5522", Male = "mediumpurple", 
-                `Gametocyte (male)` = "#1a6c8b", `Gametocyte (female)` = "#d1b252", 
-                Lab = "#D3D3D3", Unassigned = "#DCDCDC", `Failed QC` = "grey", 
-                `Not assigned` = "grey", Atlas = "grey", `Early ring` = "#D1EC9F", 
-                `Late trophozoite` = "#FEB24C", `Early schizont` = "#C9E8F1", 
-                `Late schizont` = "#85B1D3", `Gametocyte (developing)` = "thistle", 
-                `early female` = "#749E89", `late female` = "#4E6D58", Asexual = "#FF6961", 
-                `NULL` = "lightgrey", `Field unlabelled` = "#D2C1DC", "weak_score" = "#c9c9c9", "unclear" = "#dddddd")
-
-```
-
-
 #### Source common functions and variables
 ```{r}
-source("~/Talleh_code/project_plotting_fns.R")
+source("~/Talleh_code/pf_common_vars.R")
 source("~/Talleh_code/project_common_fns.R")
 
 ```
@@ -121,7 +104,7 @@ Purpose: run reads of SingleR and scmap outputs, generate preliminary stage labe
 
 
 ```{r}
-# bsub < /lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/mali22_code_lnk/3_prelim_stage_annotation/submsn_seu_norm_CbEdCr_singleR.sh
+# bsub < ~Talleh_code/submsn_seu_norm_CbEdCr_singleR.sh
 
 ```
 
@@ -222,21 +205,6 @@ sp_col_new_abrv
 ## Scmap preliminary annotation
 
 Purpose: process scmap multi-reference outputs and harmonize preliminary stage labels.
-
-
-```{r, eval=FALSE}
-# ## !!! NOTE - scmap in farm
-# ## Alternative to run scmap in farm since it take long here
-# # bsub < /lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/mali22_code_lnk/3_prelim_stage_annotation/submsn_scmap_multi_ref_bsub.sh
-# # --input_seu "/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/processed/Pf/MSC*/seu_obj/dense_CbendrCr.RDS" \
-# 
-# bpc_seu_prelim_anotd <- list.files("data/processed/Pf", pattern = "dense.*_(CbendrCr)_prelim_anotd.RDS$", full.names = T, recursive = T, include.dirs = T) %>%
-# set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|bpc_seu|bp|dense.*|_prelim_anotd|.RDS'))) %>% 
-#   .[sample_name] %>%
-#   .[!is.na(.)] %>%
-#   map(readRDS)
-```
-
 
 
 ```{r}
@@ -629,33 +597,3 @@ all_seu_prelim_stg %>% map(., ~.x@meta.data %>%
 imap(all_seu_prelim_stg, ~saveRDS(.x, paste0("data/processed/Pf/",.y, "/seu_obj/bp_prelim_stg.RDS")))
 
 ```
-
-## Compare the original sct object that was shared with talleh to the new seurat object that was created with the same counts and meta.data but with the new stage annotations to check that the stage annotations are the same between the two objects
-
-```{r, eval=T}
-msc49_ta19_counts <- Read10X("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/raw/Pf/old_objects_generated_by_jr/msc49_qcd_all_input")
-msc49_ta19_counts
-```
-
-```{r, eval=T}
-## read the m49 sct object that was shared with talleh
-msc49_sct_ta19 <- readRDS("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/raw/Pf/old_objects_generated_by_jr/msc49_sct_ta19.RDS")
-msc49_sct_ta19
-```
-
-```{r, eval=T}
-## Add the meta.data object from the old sct object to the seurat object but do not add the nfeature and ncount columns since these were calculate including human genes in the old dataset
-msc49_ta19 <- CreateSeuratObject(counts = msc49_ta19_counts, meta.data = msc49_sct_ta19@meta.data %>% select(-c(nFeature_RNA, nCount_RNA)))
-msc49_ta19@reductions$umap <- msc49_sct_ta19@reductions$umap
-```
-
-```{r, eval=T}
-saveRDS(msc49_ta19, "data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
-```
-
-```{r, eval=T}
-all_seu_prelim_stg[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% left_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
-
-all_seu_prelim_stg[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
-```
-

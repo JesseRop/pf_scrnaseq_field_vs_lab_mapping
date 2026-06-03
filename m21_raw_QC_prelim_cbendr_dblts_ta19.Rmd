@@ -14,50 +14,29 @@ output:
 suppressPackageStartupMessages({
   library(Seurat)
   library(sctransform)
-  library(glmGamPoi)
-  # library(rgl)
-  library(patchwork)
-  # library(DoubletFinder)
+  library(glmGamPoi)    # used by sctransform internals (kept)
   library(ggrepel)
-  library(ggpubr)
   library(dplyr) 
   library(stringr)
   library(purrr)
-  library(readr)
   library(tibble)
   library(ggplot2)
   library(tidyr)
   library(cowplot)
-  # library(scDblFinder)
-  library(SeuratData)
-  library(SeuratDisk)
   library(plotly)
   library(Hmisc)
   library(rmarkdown)
-  library(RColorBrewer)
-  # library(Platypus)
-  library(ggvenn)
   library(conflicted)
-  # library(SoupX)
-  library(MetBrewer)
-  library(ggh4x)
   library(SingleCellExperiment)
-  # library(scmap)
-  # library(ggsankey)
-  # library(findPC)
-  library(BPCells)
-  # library(furrr)
-  # library(future.batchtools)
-  library(parallel)
-  library(EnhancedVolcano)
-  library(DropletUtils)
-  library(ggforce)
-  library(scran)
-  library(SingleR)
   library(scDblFinder)
-  library(ggsankey)
-  library(findPC)
-  library(scDblFinder)
+
+
+  # NOTE: packages commented below are possibly unused in this Rmd.
+  # Verify across sourced files/project before permanently removing them.
+  # Packages: patchwork, ggpubr, readr, SeuratData, SeuratDisk,
+  #           RColorBrewer, ggvenn, MetBrewer, ggh4x, BPCells,
+  #           parallel, EnhancedVolcano, DropletUtils, ggforce,
+  #           scran, SingleR, ggsankey, findPC
 
   conflict_prefer("select", "dplyr")
   conflict_prefer("filter", "dplyr")
@@ -93,6 +72,28 @@ knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr
 source("~/Talleh_code/pf_common_vars.R")
 source("~/Talleh_code/project_common_fns.R")
 ```
+
+```{r}
+## Helper functions (small, well-commented)
+
+# extract_umap_mdata_single
+# - Input: a Seurat object with a `reductions$umap` embedding
+# - Output: a tibble joining `meta.data` with the UMAP coordinates and a `bcode` column
+extract_umap_mdata_single <- function(obj){
+  obj@meta.data %>%
+    rownames_to_column("bcode") %>%
+    left_join(., obj@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column("bcode"), by = "bcode")
+}
+
+# extract_umap_mdata
+# - Input: a named list of Seurat objects
+# - Output: a list of tibbles produced by `extract_umap_mdata_single`
+extract_umap_mdata <- function(obj_list){
+  purrr::map(obj_list, extract_umap_mdata_single)
+}
+
+```
+
 
 ## Read in sample name details
 
@@ -134,16 +135,12 @@ imap(all_seu_filtOlMtCb_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld",
 
 ```{r, warning=FALSE, message=FALSE}
 
-all_seu_filtOlMtCb_sct_umap_mdata <- map(all_seu_filtOlMtCb_sct, ~{
-  .x@meta.data %>% 
-    rownames_to_column("bcode") %>%
-    left_join(., .x@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column("bcode"), by = "bcode")
-})
+all_seu_filtOlMtCb_sct_umap_mdata <- extract_umap_mdata(all_seu_filtOlMtCb_sct)
 ```
 
 
 ```{r, message=FALSE, warning=FALSE, eval=T}
-# Save the poorQC cells barcodes for plotting
+# Save UMAP metadata (used for plotting and QC)
 saveRDS(all_seu_filtOlMtCb_sct_umap_mdata, "data/processed/Pf/m2_all/all_seu_filtOlMtCb_sct_umap_mdata.RDS")
 
 ```
@@ -172,7 +169,6 @@ sv_dir <- "pbulk_gtypes_preQC_resc_hspf"
 
 sample_name_nms <- sample_name
 ##Read in strain information
-# soupo_kselect_list_pp <-  readRDS("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/data/processed/Pf/strn_c_new_mdata_m22.RDS") %>% .[paste(sample_name_nms, algn_nm, sep = "_")]
 soupo_kselect_list_pp <-  readRDS(paste0("data/processed/", species, "/" , sv_dir, "/strn_c_new_mdata_m22_no_stage.RDS"))  %>% .[paste(sample_name_nms, algn_nm, sep = "_")]
 
 ##Creating Binary variable for Doublet/Singlet for doublet finder in the samples with more than 2 strains
@@ -195,38 +191,16 @@ soupo_kselect_list_pp <- pmap(list(soupo_kselect_list_pp, names(soupo_kselect_li
 map(soupo_kselect_list_pp, ~.x %>% count(Strain, Strain_DN))
 ```
 
-```{r}
-# saveRDS(soupo_kselect_list_pp, "data/processed/Pf/soupo_kselect_list_pp.RDS")
-```
-
-
 
 ```{r, eval=T}
-
-
-# all_seu_filtOlMtCb_sct <- all_seu_filtOlMtCb_sct %>%
-#   map2(., soupo_kselect_list_pp, ~AddMetaData(.x, .y %>% column_to_rownames("bcode") %>%select(Strain_DN,strain_gt, GT)))
 
 all_seu_filtOlMtCb_slct <- all_seu_filtOlMtCb_slct %>%
   map2(., soupo_kselect_list_pp, ~AddMetaData(.x, .y %>% column_to_rownames("bcode") %>%select(strain_gt, GT, Strain_DN, Strain)))
 ```
 
-```{r, eval=T}
-## Generated in ~/mali22_code_lnk/for_talleh_mapping_analysis/m2_prelim_stg_annotn_ta19.Rmd
-msc49_ta19 <- readRDS("data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
-```
-
-```{r, eval=T}
-all_seu_filtOlMtCb_slct[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(strain_gt_nw, strain_gt_old)
-```
-
-
-```{r, eval=T}
-soupo_kselect_list_pp[["MSC49_minmap"]] %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(strain_gt_nw, strain_gt_old)
-```
-
-```{r, eval=T}
-all_seu_filtOlMtCb_slct[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(strain_gt_nw, strain_gt_old)
+```{r, message=FALSE, warning=FALSE, eval=T}
+## Save for comparison with m49 old
+saveRDS(map(all_seu_filtOlMtCb_slct, ~.x@meta.data), "data/processed/Pf/m2_all/all_seu_filtOlMtCb_slct_w_strain_mdata.RDS")
 ```
 
 ```{r}
@@ -236,29 +210,7 @@ all_seu_filtOlMtCb_slct[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>%
 #####################################START - sdblfinder #################################################################
 ## scDblFinder
 
-!!!NB - FARM CODE - DONT DELETE
-```{r, eval=F}
-# ## !!! NOTE - scdbfinder in farm
-# ## Alternative to run scdbfinder in farm since it take long here
-
-# # bsub < /lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/mali22_code_lnk/6_doublet_QC/run_doubletF_rand_clust.sh 
-# # FILT_OBJ="/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/processed/Pf/MSC*/seu_obj/all_seu_filtOlMtCb_sct.RDS"
-# 
-# ## Get mdata file list
-# scf_outputs_files <- Sys.glob("data/processed/Pf/*/seu_obj/all_seu_filtOlMtCb_sct_scdblf.RDS")
-# scf_outputs_files
-# 
-# ## read filtered barcodes
-# scf_outputs <- map(scf_outputs_files, ~.x %>% 
-#                      set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj.*')))) %>% 
-#   unlist(., recursive = F) %>% 
-#   .[sample_name] %>%
-#   map(readRDS)
-
-```
-
-
-!!!NB - FARM CODE - DONT DELETE
+!!! IMPORTANT: this block is farm-run code and required by downstream automation — do not delete
 ```{r, eval=T}
 ## scDblFinder Doublet removal
 
@@ -331,7 +283,6 @@ a <- map(scf_outputs, ~{
 
 
 ```{r}
-
 all_seu_filtOlMtCb_w_dblt <- list(scf_outputs, all_seu_filtOlMtCb_slct) %>%
   pmap(~ ..1 %>%
          column_to_rownames('bcode') %>%
@@ -353,11 +304,6 @@ map(all_seu_filtOlMtCb_w_dblt, ~.x@meta.data %>% count(scf_class_norm, scf_class
 
 ```{r}
 all_seu_filtOlMtCb_w_dblt
-```
-
-```{r}
-# gogo()
-
 ```
 
 Add the doublet proportion per cluster for each of the doublet methods assessed
@@ -490,45 +436,33 @@ plot_grid(plotlist = plts_dbt_scf_p_rm, ncol = 4)
 ##### Remove remaining doublets
 ```{r}
 map(all_seu_filtOlMtCb_w_dblt, ~.@meta.data %>% dplyr::count(scf_class_norm))
-
 ```
 ##### Check doublet clusters
 ```{r}
-#
 map(all_seu_filtOlMtCb_w_dblt, ~.x@meta.data %>% count(scf_class_norm_dbt_prop > 0.1))
 
 ```
 
 
 ```{r}
-#
 map(all_seu_filtOlMtCb_w_dblt, ~.x@meta.data %>% filter(!((scf_class_norm_dbt_prop > 0.5 & scf_class_rand_dbt_prop > 0.5) )) %>% rownames_to_column("bcode") %>% mutate(across(c(scf_class_norm_dbt_prop,scf_class_rand_dbt_prop), ~round(., 2))) %>% count(seurat_clusters, scf_class_norm_dbt_prop,scf_class_rand_dbt_prop))
 
 ```
 
 ```{r}
-#
 map(all_seu_filtOlMtCb_w_dblt, ~.x@meta.data %>% filter(scf_class_norm == "Singlet") %>% count(scf_class_norm_dbt_prop < 0.20 & scf_class_rand_dbt_prop < 0.20))
 
 ```
 
 ```{r}
-#
 map(all_seu_filtOlMtCb_w_dblt, ~.x@meta.data %>% filter(scf_class_norm == "Singlet" & scf_class_norm_dbt_prop < 0.20 & scf_class_rand_dbt_prop < 0.20))
-
 ```
 
 
 ```{r}
-
 map(all_seu_filtOlMtCb_w_dblt, ~.x@meta.data %>% filter(scf_class_norm == "Singlet") %>% count(scf_class_norm_dbt_prop, scf_class_rand_dbt_prop) %>% filter(scf_class_norm_dbt_prop>0.5 ))
-
 ```
 
-
-```{r, message=FALSE}
-# thogoo()
-```
 
 ```{r}
 map(all_seu_filtOlMtCb_w_dblt, ~.x@meta.data %>%  count(scf_class_norm_dbt_prop > 0.20 & scf_class_rand_dbt_prop > 0.20))
@@ -574,19 +508,11 @@ scf_dblts_rm <- map(all_filt_cb_no_ScfStgDblts, dim) %>% as.data.frame() %>%.[2,
 scf_dblts_rm
 ```
 
-```{r, eval=T}
-all_seu_ta_missing_subset_after_dblts_rm <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_filt_cb_no_ScfStgDblts[["MSC49"]]))]
-
+```{r, message=FALSE, warning=FALSE, eval=T}
+## Save for comparison with m49 old
+saveRDS(map(all_filt_cb_no_ScfStgDblts, ~.x@meta.data), "data/processed/Pf/m2_all/all_filt_cb_no_ScfStgDblts_mdata.RDS")
 ```
 
-
-```{r, eval=T}
-all_seu_ta_missing_subset_after_dblts_rm 
-```
-
-```{r}
-# rm(all_seu_filtOlMtCb_w_dblt)
-```
 
 ```{r}
 imap(all_filt_cb_no_ScfStgDblts, possibly(~DimPlot(.x, cells.highlight = colnames(.x[,.x@meta.data$scf_class_rand == "Doublet"]), reduction = "umap") + labs(title = .y)))
@@ -599,7 +525,6 @@ map(all_filt_cb_no_ScfStgDblts, ~.x@meta.data %>% count(scf_class_norm))
 
 
 ```{r}
-
 map(all_filt_cb_no_ScfStgDblts, ~.x@meta.data %>% count( scf_class_norm_dbt_prop, scf_class_rand_dbt_prop) )
 
 ```
@@ -642,11 +567,6 @@ doublets_bcodes_rm <- list(scf_dblts_rm_bcodes) %>% set_names(c("scf_dblts_rm_bc
 saveRDS(doublets_bcodes_rm, "data/processed/Pf/m2_all/lowQC_rm_plotting/doublets_bcodes_rm.RDS")
 ```
 
-```{r}
-# gogo()
-## scrublet inputs
-```
-
 
 ################ START strain removal readded ################ 
 
@@ -678,12 +598,6 @@ map(all_filt_cb_no_StgDblts, ~.x@meta.data  %>%
 
 ```
 
-```{r}
-#
-# map(all_filt_cb_no_StgDblts, ~.x@meta.data  %>% count(strain_dbt_dbt_prop < 0.40))
-
-```
-
 
 ```{r}
 ## Barcodes removed - 
@@ -694,38 +608,37 @@ str_dbt_rm_bcodes <- map(all_filt_cb_no_StgDblts, possibly(~colnames(subset(.x, 
 
 ```{r}
 ## ¡¡¡¡¡¡ NOTE - STRAIN doublet removal Needs to move to another tab - Removing all doublets called by k=5 since this has already been determined
-# all_cb_filt_dbt <- map(all_filt_cb_no_StgDblts, ~subset(.x, strain_gt != "Doublet"))
 all_cb_filt_dbt <- map(all_filt_cb_no_StgDblts, ~subset(.x, Strain != "Doublet"))
 
 str_dbt_rm <- map(all_cb_filt_dbt, dim) %>% as.data.frame() %>% .[2,] 
 str_dbt_rm
 ```
 
-```{r, eval=T}
-(all_seu_ta_missing_subset_after_strain_dblts_rm <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_cb_filt_dbt[["MSC49"]]))])
- 
+```{r, message=FALSE, warning=FALSE, eval=T}
+## Save for comparison with m49 old
+saveRDS(map(all_cb_filt_dbt, ~.x@meta.data), "data/processed/Pf/m2_all/all_cb_filt_dbt_mdata.RDS")
 ```
+
 
 ```{r}
 ## Barcodes removed - 
-# str_dbt_rm_bcodes <- map(all_filt_cb_no_StgDblts, possibly(~colnames(subset(.x, strain_gt != "Doublet", invert = T))))
 strn_neg_rm_bcodes <- map(all_cb_filt_dbt, possibly(~colnames(subset(.x, Strain != "Negative", invert = T))))
 ```
 
 
 ```{r}
 ## ¡¡¡¡¡¡ NOTE - STRAIN negative removal Needs to move to another tab - Removing all doublets called by k=5 since this has already been determined
-# all_cb_filt_dbt <- map(all_filt_cb_no_StgDblts, ~subset(.x, strain_gt != "Negative"))
 all_cb_filt_dbt_neg <- map(all_cb_filt_dbt, ~subset(.x, Strain != "Negative"))
 
 strn_neg_rm <- map(all_cb_filt_dbt_neg, dim) %>% as.data.frame() %>% .[2,] 
 strn_neg_rm
 ```
 
-```{r, eval=T}
-(all_seu_ta_missing_subset_after_strain_neg_rm <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_cb_filt_dbt_neg[["MSC49"]]))])
- 
+```{r, message=FALSE, warning=FALSE, eval=T}
+## Save for comparison with m49 old
+saveRDS(map(all_cb_filt_dbt_neg, ~.x@meta.data), "data/processed/Pf/m2_all/all_cb_filt_dbt_neg_mdata.RDS")
 ```
+
 
 ```{r}
 doublets_bcodes_rm <- list(scf_dblts_rm_bcodes, str_dbt_rm_bcodes, strn_neg_rm_bcodes) %>% set_names(c("scf_dblts_rm_bcodes", "str_dbt_rm_bcodes", "strn_neg_rm_bcodes"))
@@ -846,19 +759,6 @@ imap(all_cb_no_dbt, ~saveRDS(.x, paste0("data/processed/Pf/",.y,"/seu_obj/all_cb
 ```
 
 
-```{r, eval=T}
-all_seu_ta_missing_subset_nodbt <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_cb_no_dbt[["MSC49"]]))]
-
-```
-
-
-```{r, eval=T}
-all_seu_ta_missing_subset_nodbt 
-```
-
-```{r}
-msc49_ta19@meta.data %>% count(scrub_doublet, scf_class_norm, scf_class_rand)
-```
 
 ```{r}
 all_cb_no_dbt[["MSC49"]]@meta.data %>% count(scf_class_norm, scf_class_rand)
@@ -874,30 +774,27 @@ all_cb_no_dbt_sct
 
 
 ```{r, warning=FALSE, message=FALSE}
-#ap2g
-all_cb_no_dbt_sct_umap_mdata <- map(all_cb_no_dbt_sct, ~{
-  .x@meta.data %>% 
-    rownames_to_column("bcode") %>%
-    left_join(., .x@reductions$umap@cell.embeddings %>% data.frame() %>% rownames_to_column("bcode"), by = "bcode")
-})
+# Example: AP2-G feature plot uses this UMAP metadata (AP2-G = PF3D7-1222600)
+all_cb_no_dbt_sct_umap_mdata <- extract_umap_mdata(all_cb_no_dbt_sct)
 
 ```
 
 
 ```{r, message=FALSE, warning=FALSE, eval=T}
-# Save the clean umaps for plotting
+# Save UMAP metadata (clean) for plotting and downstream checks
 saveRDS(all_cb_no_dbt_sct_umap_mdata, "data/processed/Pf/m2_all/lowQC_rm_plotting/all_cb_no_dbt_sct_umap_mdata.RDS")
 
 ```
 
 ```{r, warning=FALSE, message=FALSE}
-go()
+# go()
 ```
 
 ```{r, warning=FALSE, message=FALSE}
 imap(all_cb_no_dbt_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1, reduction = "pca")+ scale_color_manual(values = sp_col_new) + labs(title = .y))
 imap(all_cb_no_dbt_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))
 ```
+
 ```{r, warning=FALSE, message=FALSE}
 imap(all_cb_no_dbt_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1, reduction = "pca")+ scale_color_manual(values = sp_col_new) + labs(title = .y))
 imap(all_cb_no_dbt_sct, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))

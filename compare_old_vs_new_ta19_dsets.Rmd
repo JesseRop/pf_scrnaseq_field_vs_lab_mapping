@@ -1,0 +1,281 @@
+---
+title: "MSC QC and preprocessing"
+date: '2022-07-11'
+author: 'Jesse Rop'
+output:
+  html_document:
+    toc: true
+    theme: united
+    code_folding: hide
+    df_print: paged
+---
+
+**Purpose:** This notebook performs preliminary stage annotation and QC for MSC samples. It loads packages, reads annotation outputs from SingleR and scmap, compares annotations, and writes stage labels for downstream pseudobulk genotyping. Keep code chunks unchanged.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr) 
+  library(stringr)
+  library(purrr)
+  library(tibble)
+  library(ggplot2)
+  library(tidyr)
+  library(conflicted)
+  library(SingleCellExperiment)
+  library(SingleR)
+  library(ggsankey)
+  library(scmap)
+  library(scuttle)
+  
+  conflict_prefer("select", "dplyr")
+  conflict_prefer("filter", "dplyr")
+  conflict_prefer("rename", "dplyr")
+  conflict_prefer("map", "purrr")
+  conflict_prefer("count", "dplyr")
+  conflicts_prefer(base::saveRDS)
+  conflicts_prefer(SingleCellExperiment::colData)
+  conflicts_prefer(base::as.data.frame)
+  conflicts_prefer(base::intersect)
+  conflicts_prefer(dplyr::desc)
+  conflicts_prefer(dplyr::count)
+})
+```
+
+
+
+# MSC stage annotation and gene expression QC
+
+## Setup and read inputs
+
+Purpose: load required libraries and set knitr options for reproducible rendering.
+
+```{r, setup}
+knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh')
+
+```
+
+#### Source common functions and variables
+```{r}
+source("~/Talleh_code/pf_common_vars.R")
+source("~/Talleh_code/project_common_fns.R")
+
+```
+
+## Read in sample name details
+
+```{r}
+# Select sample names
+sample_name <- c("MSC49", "MSC68")
+
+```
+
+## 1 COMPARISON AFTER STAGE ANNOTATION
+
+```{r, eval=T}
+# Read annotated Seurat objects (prelim stage) for the selected samples
+all_seu_prelim_stg <- list.files("data/processed/Pf", pattern = "bp_prelim_stg.RDS$", full.names = T, recursive = T, include.dirs = T) %>% 
+  set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|bp_prelim_stg.*.RDS'))) %>% 
+  .[sample_name] %>%
+  map(readRDS)
+```
+
+
+## Compare the original sct object that was shared with talleh to the new seurat object that was created with the same counts and meta.data but with the new stage annotations to check that the stage annotations are the same between the two objects
+
+```{r, eval=T}
+msc49_ta19_counts <- Read10X("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/raw/Pf/old_objects_generated_by_jr/msc49_qcd_all_input")
+msc49_ta19_counts
+```
+
+```{r, eval=T}
+## read the m49 sct object that was shared with talleh
+msc49_sct_ta19 <- readRDS("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/raw/Pf/old_objects_generated_by_jr/msc49_sct_ta19.RDS")
+msc49_sct_ta19
+```
+
+```{r, eval=T}
+## Add the meta.data object from the old sct object to the seurat object but do not add the nfeature and ncount columns since these were calculate including human genes in the old dataset
+msc49_ta19 <- CreateSeuratObject(counts = msc49_ta19_counts, meta.data = msc49_sct_ta19@meta.data %>% select(-c(nFeature_RNA, nCount_RNA)))
+msc49_ta19@reductions$umap <- msc49_sct_ta19@reductions$umap
+```
+
+```{r, eval=T}
+saveRDS(msc49_ta19, "data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
+```
+
+```{r, eval=T}
+all_seu_prelim_stg[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% left_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
+
+all_seu_prelim_stg[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
+```
+
+## 1 COMPARISON OF MITOCHONDRIAL PERCENT ESTIMATES BEFORE THE REMOVAL OF THESE OUTLIERS
+
+## Compare the original sct object that was shared with talleh to the new seurat object that was created with the same counts and meta.data but with the new stage annotations to check that the stage annotations are the same between the two objects
+
+```{r, eval=T}
+# Read annotated Seurat objects (prelim stage) for the selected samples
+all_seu_prelim_stg_norm_for_pct.mito_comp <- list.files("data/processed/Pf", pattern = "seu_prelim_stg_norm_for_comp_b4_pct_mito_filt.RDS$", full.names = T, recursive = T, include.dirs = T) %>% 
+  set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|seu_prelim_stg_norm_for_comp_b4_pct_mito_filt.*.RDS'))) %>% 
+  .[sample_name] %>%
+  map(readRDS)
+```
+
+```{r, eval=T}
+## Generated in ~/mali22_code_lnk/for_talleh_mapping_analysis/m2_prelim_stg_annotn_ta19.Rmd
+msc49_ta19 <- readRDS("data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
+```
+
+```{r, eval=T}
+## Compare metadata fields (percent.mt) between new object and original MSC49
+all_seu_prelim_stg_norm_for_pct.mito_comp[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = percent.mt_nw, percent.mt_old, color = stage_fld)) + geom_point() + geom_abline()
+```
+
+```{r, eval=T}
+## Compute mitochondrial percent in the reference object (RNA assay)
+# DefaultAssay(msc49_ta19) <- "RNA"
+msc49_ta19 <- PercentageFeatureSet(msc49_ta19, features = rownames(msc49_ta19)[str_detect(rownames(msc49_ta19), "MIT")], col.name = 'percent.mt_rna', assay = "RNA")
+```
+
+```{r, eval=T}
+msc49_ta19@meta.data %>% ggplot(aes(x = nCount_RNA, pf_umi_count)) + geom_point() + geom_abline()
+msc49_ta19@meta.data %>% ggplot(aes(x = percent.mt, percent.mt_rna)) + geom_point() + geom_abline()
+```
+
+```{r, eval=T}
+all_seu_prelim_stg_norm_for_pct.mito_comp[["MSC49"]]@meta.data %>% ggplot(aes(x = nCount_RNA, pf_umi_count)) + geom_point() + geom_abline()
+
+```
+
+```{r, eval=T}
+all_seu_prelim_stg_norm_for_pct.mito_comp[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = percent.mt_nw, percent.mt_rna, color = stage_fld)) + geom_point(size = 0.01) + geom_abline()
+```
+
+```{r, eval=T}
+all_seu_prelim_stg_norm_for_pct.mito_comp[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = nFeature_RNA_nw, nFeature_RNA_old, color = stage_fld)) + geom_point() + geom_abline()
+```
+
+```{r, eval=T}
+FetchData(all_seu_prelim_stg_norm_for_pct.mito_comp[["MSC49"]], vars = "PF3D7-MIT02100", layer = "counts") %>% rownames_to_column("bcode") %>% right_join(., FetchData(msc49_ta19, vars = "PF3D7-MIT02100", layer = "counts") %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = `PF3D7-MIT02100_nw`, `PF3D7-MIT02100_old`)) + geom_point() + geom_abline()
+
+```
+
+```{r, eval=T}
+all_seu_prelim_stg_norm_for_pct.mito_comp[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% ggplot(aes(x = pf_umi_count_nw, pf_umi_count_old, color = stage_fld)) + geom_point() + geom_abline()
+```
+
+
+```{r, eval=T}
+all_seu_prelim_stg_norm_for_pct.mito_comp[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
+```
+
+COMPARE AFTER MITO PCT OUTLIER REMOVAL
+
+```{r, eval=T}
+# Read annotated Seurat objects (prelim stage) for the selected samples
+all_seu_prelim_stg_norm_for_comp_after_pct_mito_filt <- list.files("data/processed/Pf", pattern = "seu_prelim_stg_norm_for_comp_after_pct_mito_filt.RDS$", full.names = T, recursive = T, include.dirs = T) %>% 
+  set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|seu_prelim_stg_norm_for_comp_after_pct_mito_filt.*.RDS'))) %>% 
+  .[sample_name] %>%
+  map(readRDS)
+```
+
+
+```{r, eval=T}
+all_seu_ta_mt_filt_missing_subset <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_seu_prelim_stg_norm_for_comp_after_pct_mito_filt[["MSC49"]]))]
+all_seu_ta_mt_filt_missing_subset
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+imap(all_seu_prelim_stg_norm_for_comp_after_pct_mito_filt, ~DimPlot(.x, dims = c(1,3), group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))
+imap(all_seu_prelim_stg_norm_for_comp_after_pct_mito_filt, ~DimPlot(.x, dims = c(1,2), group.by = "stage_fld", pt.size = 0.1)+ scale_color_manual(values = sp_col_new) + labs(title = .y))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+imap(all_seu_prelim_stg_norm_for_comp_after_pct_mito_filt, ~VlnPlot(.x, features = "nFeature_RNA", group.by = "stage_fld", pt.size = 0.1) + scale_color_manual(values = sp_col_new) + scale_y_log10() +  labs(title = .y))
+```
+
+COMPARE AFTER GENE COUNT UMI COUNT OUTLIER REMOVAL
+
+
+```{r, eval=T}
+# Read annotated Seurat objects (prelim stage) for the selected samples
+all_seu_filtOlMtCb_after_outlier_rm_b4_cbenderqc <- list.files("data/processed/Pf", pattern = "all_seu_filtOlMtCb_after_outlier_rm_b4_cbenderqc.RDS$", full.names = T, recursive = T, include.dirs = T) %>% 
+  set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|all_seu_filtOlMtCb_after_outlier_rm_b4_cbenderqc.*.RDS'))) %>% 
+  .[sample_name] %>%
+  map(readRDS)
+```
+
+Check the number of lost cells from original talleh dataset after outlier removal
+```{r, eval=T}
+all_seu_ta_mt_filt_missing_subset_afterOutlierRm <- msc49_ta19[,!(colnames(msc49_ta19) %in% colnames(all_seu_filtOlMtCb_after_outlier_rm_b4_cbenderqc[["MSC49"]]))]
+all_seu_ta_mt_filt_missing_subset_afterOutlierRm
+```
+
+
+COMPARE FINAL AFTER REMOVAL OF ALL POOR QC
+
+```{r, message=FALSE, warning=FALSE, eval=T}
+# Save the poorQC cells barcodes for plotting
+all_seu_filtOlMtCb_umap_mdata <- readRDS("data/processed/Pf/m2_all/lowQC_rm_plotting/all_seu_filtOlMtCb_umap_mdata.RDS")
+
+```
+
+```{r, eval=T}
+all_seu_filtOlMtCb_umap_mdata[["MSC49"]] %>% left_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
+
+all_seu_filtOlMtCb_umap_mdata[["MSC49"]] %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
+```
+
+
+```{r, eval=T}
+all_seu_ta_missing_subset <- msc49_ta19[,!(colnames(msc49_ta19) %in% all_seu_filtOlMtCb_umap_mdata[["MSC49"]]$bcode)]
+
+```
+
+
+```{r, eval=T}
+all_seu_ta_missing_subset 
+```
+
+COMPARE STRAIN K=3 CONSENSUS ANNOTAION IN THE NEW OBJECT VERSUS OLD
+
+```{r, message=FALSE, warning=FALSE, eval=T}
+all_seu_filtOlMtCb_slct_w_strain_mdata <- readRDS("data/processed/Pf/m2_all/all_seu_filtOlMtCb_slct_w_strain_mdata.RDS")
+```
+
+```{r, eval=T}
+all_seu_filtOlMtCb_slct_w_strain_mdata[["MSC49"]] %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(strain_gt_nw, strain_gt_old)
+```
+
+```{r, eval=T}
+all_seu_filtOlMtCb_slct_w_strain_mdata[["MSC49"]] %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(strain_gt_nw, strain_gt_old)
+```
+
+COMPARE AFTER STAGE DOUBLET REMOVAL
+
+```{r, message=FALSE, warning=FALSE, eval=T}
+all_filt_cb_no_ScfStgDblts_mdata <- readRDS("data/processed/Pf/m2_all/all_filt_cb_no_ScfStgDblts_mdata.RDS")
+
+```
+
+```{r, eval=T}
+(all_filt_cb_no_ScfStgDblts_mdata_rm <- msc49_ta19[,!(colnames(msc49_ta19) %in% rownames(all_filt_cb_no_ScfStgDblts_mdata[["MSC49"]]))])
+
+```
+
+
+COMPARE AFTER STRAIN NEGATIVE REMOVAL
+
+```{r, message=FALSE, warning=FALSE, eval=T}
+## Save for comparison with m49 old
+all_cb_filt_dbt_neg_mdata <- readRDS("data/processed/Pf/m2_all/all_cb_filt_dbt_neg_mdata.RDS")
+```
+
+```{r, eval=T}
+(all_seu_ta_missing_subset_after_strain_neg_rm <- msc49_ta19[,!(colnames(msc49_ta19) %in% rownames(all_cb_filt_dbt_neg_mdata[["MSC49"]]))])
+ 
+```
