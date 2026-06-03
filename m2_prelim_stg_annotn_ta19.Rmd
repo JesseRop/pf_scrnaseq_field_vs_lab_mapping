@@ -1,0 +1,661 @@
+---
+title: "MSC QC and preprocessing"
+date: '2022-07-11'
+author: 'Jesse Rop'
+output:
+  html_document:
+    toc: true
+    theme: united
+    code_folding: hide
+    df_print: paged
+---
+
+**Purpose:** This notebook performs preliminary stage annotation and QC for MSC samples. It loads packages, reads annotation outputs from SingleR and scmap, compares annotations, and writes stage labels for downstream pseudobulk genotyping. Keep code chunks unchanged.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr) 
+  library(stringr)
+  library(purrr)
+  library(tibble)
+  library(ggplot2)
+  library(tidyr)
+  library(conflicted)
+  library(SingleCellExperiment)
+  library(SingleR)
+  library(ggsankey)
+  library(scmap)
+  library(scuttle)
+  
+  conflict_prefer("select", "dplyr")
+  conflict_prefer("filter", "dplyr")
+  conflict_prefer("rename", "dplyr")
+  conflict_prefer("map", "purrr")
+  conflict_prefer("count", "dplyr")
+  conflicts_prefer(base::saveRDS)
+  conflicts_prefer(SingleCellExperiment::colData)
+  conflicts_prefer(base::as.data.frame)
+  conflicts_prefer(base::intersect)
+  conflicts_prefer(dplyr::desc)
+  conflicts_prefer(dplyr::count)
+})
+```
+
+
+
+# MSC stage annotation and gene expression QC
+
+## Setup and read inputs
+
+Purpose: load required libraries and set knitr options for reproducible rendering.
+
+```{r, setup}
+knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh')
+
+```
+
+### Variable declarations
+
+```{r}
+##colors
+sp_col_new <- c(`Late ring` = "#78C679", `Early trophozoite` = "#FEEEAA", `Female (LE)` = "#a97f2f", 
+                Female = "#551A8B", `Male (LE)` = "#7e5522", Male = "mediumpurple", 
+                `Gametocyte (male)` = "#1a6c8b", `Gametocyte (female)` = "#d1b252", 
+                Lab = "#D3D3D3", Unassigned = "#DCDCDC", `Failed QC` = "grey", 
+                `Not assigned` = "grey", Atlas = "grey", `Early ring` = "#D1EC9F", 
+                `Late trophozoite` = "#FEB24C", `Early schizont` = "#C9E8F1", 
+                `Late schizont` = "#85B1D3", `Gametocyte (developing)` = "thistle", 
+                `early female` = "#749E89", `late female` = "#4E6D58", Asexual = "#FF6961", 
+                `NULL` = "lightgrey", `Field unlabelled` = "#D2C1DC", "weak_score" = "#c9c9c9", "unclear" = "#dddddd")
+
+```
+
+
+#### Source common functions and variables
+```{r}
+source("~/Talleh_code/project_plotting_fns.R")
+source("~/Talleh_code/project_common_fns.R")
+
+```
+
+## Read in sample name details
+
+```{r}
+# Select sample names
+sample_name <- c("MSC49", "MSC68")
+
+```
+
+## Read in seurat objects
+```{r, message=F, warning=F, eval=T}
+## Get mdata file list
+all_seu_list_files <- Sys.glob("data/processed/Pf/*/seu_obj/dense_CbendrCr.RDS")
+all_seu_list_files
+```
+
+```{r, message=F, warning=F, eval=T}
+## read filtered barcodes
+all_seu <- map(all_seu_list_files, ~.x %>% 
+                 set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/dense.*RDS')))) %>% 
+  unlist(., recursive = F) %>% 
+  .[sample_name] %>%
+  map(readRDS)
+
+
+```
+
+## Stage Annotation
+
+```{r, message=FALSE, warning=FALSE}
+# Create abbreviated color map for plotting (short names used in figures)
+sp_col_new_abrv <- sp_col_new
+names(sp_col_new_abrv) <- str_replace_all(names(sp_col_new), c("discrepantFM" = "dFM", "weak_score" = "WS", "Early " = "E", "Late " = "L", "ring" = "R", "trophozoite" = "T", "Female" = "F", "Male" = "M", " \\(LE\\)" = "LE", "Gametocyte \\(developing\\)" = "Gd"))
+
+sp_col_new_abrv
+```
+
+
+## SingleR and scmap preliminary annotation
+Purpose: run reads of SingleR and scmap outputs, generate preliminary stage labels for cells, and produce diagnostic plots.
+
+
+```{r}
+# bsub < /lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/mali22_code_lnk/3_prelim_stage_annotation/submsn_seu_norm_CbEdCr_singleR.sh
+
+```
+
+Read in cell annotation singleR processed in farm
+```{r, message=F, warning=F}
+##Read singleR annotations
+all_pref_pred <- list.files("data/processed/Pf", pattern = "dense.*_(CbendrCr)_pred_sR.RDS$", full.names = T, recursive = T, include.dirs = T) %>%
+  set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|bpc_seu|bp|dense.*'))) %>% 
+  .[sample_name] %>%
+  .[!is.na(.)] %>%
+  map(readRDS)
+
+```
+
+
+```{r}
+# Show label counts for the first two SingleR prediction objects
+map(all_pref_pred[1:2], ~table(.x$labels))
+```
+
+
+```{r, eval=T}
+# Plot delta distribution for the first SingleR result (disabled)
+map(all_pref_pred[1], ~plotDeltaDistribution(.x))
+
+```
+
+
+### Evaluate SingleR manually
+
+Purpose: inspect SingleR scoring and resolve ambiguous male/female calls.
+```{r, message=FALSE}
+## Get predictions for stages
+all_pref_pred_df <- map(all_pref_pred, ~.x[, c("scores", "labels", "pruned.labels", "reference")] %>% 
+                          as.data.frame() %>% 
+                          rename_with(~str_replace_all(., c("\\.\\."="_", "\\."="_", "_$"="")), contains("score")) %>%
+                          rownames_to_column("bcode"))
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+all_pref_pred_df <- map2(all_pref_pred_df, all_pref_pred, ~{
+  df <- .x %>% 
+    mutate(sr_score_ref = paste0("scores_", names(.y@listData$orig.results)[reference], "_scores"),
+           sr_labl_ref = paste0("scores_", names(.y@listData$orig.results)[reference], "_labels")) 
+  
+  
+  df <- df %>% 
+    mutate(actl_score = purrr::map2_dbl(row_number(), sr_score_ref, ~df[.x, .y]),
+           actl_labl = purrr::map2_chr(row_number(), sr_labl_ref, ~df[.x, .y]),
+           MaleFem_consistency = case_when(if_any(ends_with("_labels"), ~str_detect(., "Female")) & if_any(ends_with("_labels"), ~str_detect(., "Male")) ~ "MaleFem",
+                                           T ~ labels))
+  
+  
+  return(df)
+  
+  
+})
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+map(all_pref_pred_df, ~.x %>% count(labels, actl_labl, MaleFem_consistency) %>% filter(MaleFem_consistency == "MaleFem"))
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+# Derive final SingleR stage labels and coarse groupings
+# This transformation processes the predictions from SingleR to create a final dataframe with stage labels.
+all_pref_pred_df_fnl <- map(all_pref_pred_df, ~.x %>% 
+                              select("bcode", "labels", "pruned.labels", "reference", "actl_labl", "actl_score", "MaleFem_consistency") %>% 
+                              mutate(fine_stg = case_when(is.na(pruned.labels) ~ "weak_score",
+                                                          MaleFem_consistency == "MaleFem" ~ "discrepantFM",
+                                                          T ~ pruned.labels),
+                                     stage_afm = case_when(str_detect(fine_stg, "ring|troph|schizont|developing") ~ "Asexual",
+                                                           str_detect(fine_stg, "Female") ~ "Female",
+                                                           str_detect(fine_stg, "Male") ~ "Male",
+                                                           T ~ fine_stg),
+                                     stage_ag = ifelse(stage_afm %in% c("Female", "Male"), "Gametocyte", stage_afm )) %>%
+                              rename_with(~paste0("sR_", .), .cols = -c(bcode)))
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+# Create abbreviated color map for plotting (short names used in figures)
+sp_col_new_abrv <- sp_col_new
+names(sp_col_new_abrv) <- str_replace_all(names(sp_col_new), c("discrepantFM" = "dFM", "weak_score" = "WS", "Early " = "E", "Late " = "L", "ring" = "R", "trophozoite" = "T", "Female" = "F", "Male" = "M", " \\(LE\\)" = "LE", "Gametocyte \\(developing\\)" = "Gd"))
+
+sp_col_new_abrv
+```
+
+
+
+##################################################  END - SingleR use markers to id cells ##################################################
+
+## Scmap preliminary annotation
+
+Purpose: process scmap multi-reference outputs and harmonize preliminary stage labels.
+
+
+```{r, eval=FALSE}
+# ## !!! NOTE - scmap in farm
+# ## Alternative to run scmap in farm since it take long here
+# # bsub < /lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/mali22_code_lnk/3_prelim_stage_annotation/submsn_scmap_multi_ref_bsub.sh
+# # --input_seu "/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/processed/Pf/MSC*/seu_obj/dense_CbendrCr.RDS" \
+# 
+# bpc_seu_prelim_anotd <- list.files("data/processed/Pf", pattern = "dense.*_(CbendrCr)_prelim_anotd.RDS$", full.names = T, recursive = T, include.dirs = T) %>%
+# set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|bpc_seu|bp|dense.*|_prelim_anotd|.RDS'))) %>% 
+#   .[sample_name] %>%
+#   .[!is.na(.)] %>%
+#   map(readRDS)
+```
+
+
+
+```{r}
+## !!! NOTE - scmap ran here
+## Assigning stages
+
+#  W (number of top assigned labels that need to be identical)
+W <- 3
+
+# COS_SIM (cosine similarity threshhold needed for all top 3 cells to pass for stage labelled to be assigned)
+COS_SIM <- 0.4
+
+## Read in parameters for the first (MCA) reference/atlas object
+SCE_REF <- "annotation_references/v3labmscs.ref.sce.stgasx.RDS"
+STG_LABL <- "stageHL_ref"
+STG_ANOT <- "stages_mca"
+
+## Read in parameters for the second (Lasse) reference/atlas object
+SCE_REF2 <- "annotation_references/lasse_natural_infcns_sce.RDS"
+STG_LABL2 <- "pseudotime.stages"
+STG_ANOT2 <- "stages_lasse"
+
+stg_anot_labls <-c(STG_ANOT, STG_ANOT2)
+
+
+```
+
+```{r}
+
+# Read in the reference datasets and perform preprocessing
+sce_ref_list <- map2(list(SCE_REF, SCE_REF2), list(STG_LABL, STG_LABL2),  ~{
+  ##Read MCA V3 + field blood stage reference dataset
+  sce_ref <- readRDS(.x)
+  
+  ## Log transform counts using SCE formula
+  sce_ref <- logNormCounts(sce_ref, assay.type = "counts", transform = "log")
+  
+  ## Add gene names to relevant slot. Needed by scmap
+  rowData(sce_ref)$feature_symbol <- rownames(sce_ref)
+  
+  ## Add the column to use as stage labels
+  sce_ref@colData[,'ref_stage'] <- sce_ref@colData[,.y]
+  
+  
+  ##scmap feature selection
+  sce_ref <- selectFeatures(sce_ref, suppress_plot = T)
+  
+  ##Cell indexing
+  set.seed(155)
+  sce_ref <- indexCell(sce_ref)
+  
+})
+
+```
+
+```{r}
+bpc_seu_prelim_anotd <- map(all_seu, ~{
+  ## Read in seurat object
+  all_msc <- .x
+  
+  ### Preprocessing MSC query datasets
+  
+  ## Convert seurat object into single cell experiment filling in the slots appropriately
+  msc_sce <- SingleCellExperiment(assays = list(counts = as(object = all_msc[["RNA"]]$counts, Class = "dgCMatrix")), colData = all_msc@meta.data)
+  
+  # logcounts(msc_sce) <- log2((SingleCellExperiment::counts(msc_sce) + 1))
+  msc_sce <- logNormCounts(msc_sce, assay.type = "counts", transform = "log")
+  
+  rowData(msc_sce)$feature_symbol <- rownames(msc_sce)
+  
+  msc_sce <- msc_sce[!duplicated(rownames(msc_sce)), ]
+  
+  ### Stage label assignment (projection)
+  # transferring labels from  reference datasets
+  
+  ## Run scmap
+  
+  msc_jc <-  scmapCell(msc_sce, list(
+    metadata(sce_ref_list[[1]])$scmap_cell_index,
+    metadata(sce_ref_list[[2]])$scmap_cell_index
+  ) %>% set_names(stg_anot_labls)
+  )
+  
+  ##Projection
+  # Assigning stage labels only when the top 3 most closest reference cells to a query cell all have a similar stage label and a cosine similarity greater than 0.4
+  msc_lbls <- scmapCell2Cluster(
+    msc_jc, 
+    list(
+      SummarizedExperiment::colData(sce_ref_list[[1]])$ref_stage,
+      SummarizedExperiment::colData(sce_ref_list[[2]])$ref_stage
+    ), 
+    w = as.numeric(W), threshold = as.numeric(COS_SIM))
+  
+  
+  # Obtaining the reference cell that is closest to each query cell in neighbourhood space regardless of cosine similarity. For those where the top 10 most closest cells constitute several stages, we also obtain the second most similar stage.
+  ## Get the top V3 cell and top 3 similarity scores that is most similar to each MSC14 cell 
+  
+  sc_topv3_cells_sims <- pmap(list(stg_anot_labls, sce_ref_list), ~{
+    stg_lab <- ..1
+    ref_obj <- ..2
+    msc_jc[[stg_lab]]$similarities %>% 
+      .[1:3,] %>% 
+      t() %>% 
+      data.frame() %>% 
+      rename_all(., ~str_replace(., 'X', 'sim_lab')) %>% 
+      rownames_to_column('bcode') %>%
+      left_join(., msc_jc[[stg_lab]]$cells %>% 
+                  .[1:3,] %>% t() %>% 
+                  data.frame() %>% 
+                  rename_all(., ~str_replace(., 'X', 'msc_ref_cells')) %>% 
+                  rownames_to_column('bcode'),
+                by = 'bcode') %>% 
+      # mutate(across(starts_with('msc_ref_cells'), ~colnames(msc_combi.sce)[.]))
+      mutate(across(starts_with('msc_ref_cells'), ~colnames(ref_obj)[.]))
+  })
+  
+  
+  # Adding annotations to MSC query datasets
+  
+  ## Adding annotations to query cells
+  stg_anots <- map(sce_ref_list, ~.x@colData[,c('ref_stage'), drop=F] %>% data.frame())
+  
+  ## scmap merge the top labels and similarity scores
+  top_stg_sim <- map2(sc_topv3_cells_sims, stg_anots, ~.x %>% 
+                        left_join(.y %>% rownames_to_column('msc_ref_cells1') %>% rename('stage_lab1' = 'ref_stage'), by = 'msc_ref_cells1') %>%
+                        left_join(.y %>% rownames_to_column('msc_ref_cells2') %>% rename('stage_lab2' = 'ref_stage'), by = 'msc_ref_cells2') %>%
+                        left_join(.y %>% rownames_to_column('msc_ref_cells3') %>% rename('stage_lab3' = 'ref_stage'), by = 'msc_ref_cells3') %>% 
+                        column_to_rownames('bcode')
+  )
+  
+  
+  # Put the annotations together and write out
+  msc_anots <- pmap(list(stg_anot_labls, top_stg_sim), ~{
+    list(colnames(msc_jc[[..1]]$cells),
+         msc_lbls$scmap_cluster_labs[,..1],
+         msc_lbls$combined_labs) %>%
+      set_names(c("cell_bc", paste0(..1, "_lab"), "combined_labs")) %>%
+      data.frame()  %>% 
+      full_join(., ..2 %>% rownames_to_column("cell_bc"), by = "cell_bc")
+  }) %>% 
+    set_names(stg_anot_labls) %>%
+    bind_rows(., .id = "ref")
+  
+  return(msc_anots)
+  
+})
+
+# saveRDS(msc_anots, paste0(O_FILE,"/msc_anots.RDS"))
+# saveRDS(msc_anots, O_FILE)
+
+
+```
+
+
+
+```{r}
+# Apply scmap reference-specific label refinement rules based on similarity scores
+multi_ref_stg_tbl1 <- map(bpc_seu_prelim_anotd, ~{
+  obj <- .x
+  map(c("stages_mca", "stages_lasse"), ~{
+    obj %>% 
+      filter(ref == .x ) %>%
+      mutate(!!rlang::sym(paste0(.x, "_lf")) := case_when(
+        !!rlang::sym(paste0(.x, "_lab")) == "unassigned" & if_any(starts_with("sim_"), ~.x > 0.3) & if_all(starts_with("stage_"), ~str_detect(.x, "ring|rophozoite|eveloping|Ring|chizont")) ~ stage_lab1,
+        !!rlang::sym(paste0(.x, "_lab")) == "unassigned" & if_any(starts_with("sim_"), ~.x > 0.4) & if_all(starts_with("stage_"), ~str_detect(.x, "Male| male|\\(male|eveloping")) ~ stage_lab1,
+        !!rlang::sym(paste0(.x, "_lab")) == "unassigned" & if_any(starts_with("sim_"), ~.x > 0.4) & if_all(starts_with("stage_"), ~str_detect(.x, "Female|female|eveloping")) ~ stage_lab1,
+        TRUE ~ !!rlang::sym(paste0(.x, "_lab"))
+      )) 
+  })
+})
+
+```
+
+
+```{r}
+map(multi_ref_stg_tbl1, ~.x[[1]] %>% count(stages_mca_lf, combined_labs))
+
+```
+
+
+
+```{r}
+# Harmonize stage labels across scmap references and apply consensus logic
+multi_ref_stg_tbl2 <- map(multi_ref_stg_tbl1, ~{
+  tbl <- .x
+  
+  map(tbl, ~.x %>% select(any_of(c('cell_bc', 'stages_mca_lf', 'stages_lasse_lf', 'combined_labs')), contains("sim_"), contains("stage_"))) %>% 
+    purrr::reduce(., ~full_join(.x, .y, by = c("cell_bc", "combined_labs"), suffix = c("_mca", "_lasse"))) %>%
+    mutate(
+      stage_final = case_when(
+        combined_labs == "unassigned" & if_any(c('stages_mca_lf', 'stages_lasse_lf'), ~str_detect(.x, "ring|rophozoite|eveloping|Ring|chizont")) ~ stages_lasse_lf, 
+        combined_labs == "unassigned" & if_any(c('stages_mca_lf', 'stages_lasse_lf'), ~str_detect(.x, "Male| male|\\(male|eveloping")) ~ stages_mca_lf,  
+        combined_labs == "unassigned" & if_any(c('stages_mca_lf', 'stages_lasse_lf'), ~str_detect(.x, "Female|female|eveloping")) ~ stages_mca_lf, 
+        T ~ combined_labs),
+      stage_final2 = case_when(
+        stage_final == "unassigned" & if_any(c('stages_mca_lf', 'stages_lasse_lf'), ~str_detect(.x, "ring|rophozoite|eveloping|Ring|chizont")) ~ stages_mca_lf, 
+        T ~ stage_final)
+    )
+})
+
+```
+
+```{r}
+# Count cells with unassigned stage labels after harmonization
+map(multi_ref_stg_tbl2, ~.x %>% filter(stage_final2 == "unassigned") %>% dim() %>% .[1]) %>% data.frame() %>% t()
+
+```
+
+```{r}
+# Format final stage labels: standardize names, remove abbreviated placeholders, and derive coarse stage groupings
+multi_ref_stg_tbl2_slct <- map(multi_ref_stg_tbl2, ~ .x %>%
+                                 column_to_rownames("cell_bc") %>%
+                                 select(combined_labs, stage_final, stage_final2, sim_lab1_mca) %>% 
+                                 mutate(across(c(stage_final2), ~
+                                                 str_replace_all(., c("Trophozoite" = " trophozoite", 
+                                                                      "Ring" = " ring",
+                                                                      "Schizont" = " schizont", 
+                                                                      "early" = "Early",
+                                                                      "late" = "Late",
+                                                                      "DevelopingGametocyte" = "Gametocyte (developing)",
+                                                                      "aleGametocyte" = "ale",
+                                                                      "gametocyte" = "Gametocyte",
+                                                                      "LE" = "(LE)",
+                                                                      "unassigned" = "Unassigned",
+                                                                      "Gametocyte \\(male\\)" = "Male",
+                                                                      "Gametocyte \\(female\\)" = "Female")))
+                                 ) %>% 
+                                 mutate(stage_fld = str_replace_all(stage_final2, c("Mid trophozoite" = "Early trophozoite", ".*schizont" = "Schizont")),
+                                        stage_afm = case_when(str_detect(stage_fld, "ring|rophozoite|chizont|eveloping") ~ "Asexual",
+                                                              str_detect(stage_fld, "Female") ~ "Female",
+                                                              str_detect(stage_fld, "Male") ~ "Male",
+                                                              T ~ stage_fld),
+                                        stage_ag = ifelse(stage_afm %in% c("Female", "Male"), "Gametocyte", stage_afm ))
+)
+
+```
+
+################################################## END - Scmap preliminary annoation ##############################################
+
+## Compare scmap and SingleR
+
+Purpose: compare stage labels from scmap and SingleR, summarize agreement, and create sankey/heatmap diagnostics.
+
+```{r, message=FALSE, warning=FALSE}
+
+all_pref_pred_df_fnl_cbender <- all_pref_pred_df_fnl
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+singleR_scmap_df_snky <- map2(all_pref_pred_df_fnl_cbender, multi_ref_stg_tbl2_slct[names(all_pref_pred_df_fnl_cbender)], ~.x %>% 
+                                # rename("stage_final2" = sR_fine_stg) %>%
+                                select(sR_fine_stg, sR_stage_afm, bcode) %>%
+                                left_join(., .y %>% 
+                                            rownames_to_column("bcode") %>% 
+                                            select(stage_fld, stage_afm, bcode), 
+                                          by = "bcode")  %>%  
+                                mutate(across(c(stage_fld, sR_fine_stg), ~str_replace_all(., c("discrepantFM" = "dFM", "weak_score" = "WS", "Early " = "E", "Late " = "L", "ring" = "R", "trophozoite" = "T", "Schizont" = "S", "Female" = "F", "Male" = "M", " \\(LE\\)" = "LE", "Gametocyte \\(developing\\)" = "Gd")))) 
+)
+
+
+```
+
+
+```{r, fig.width=4, fig.height=4}
+# Define sankey plot helper used to compare label assignments between methods
+snk_pt_fn <- function(decod_tbl, strns_2_plt = c('Strain_2nd', 'n_strains'), labls = paste0("K=", opt_clusters_nms[[3]][1:2]), bp_face = c("bold", "plain"), ttl = "plot", strain_colours = strain_cols_n) {
+  decod_tbl %>% 
+    mutate(across(contains("train"), ~str_replace_all(., c("Doublet" = "Dbt", "Negative" = "Neg")))) %>%
+    make_long(all_of(strns_2_plt)) %>% 
+    add_count(x,node, "n") %>%
+    ggplot(., aes(x = x, next_x = next_x,node = node,next_node = next_node,fill = factor(node),label = paste0(node,": ",n))) +
+    geom_sankey() +
+    theme_void()+
+    scale_fill_manual(values = strain_colours) +
+    scale_x_discrete(labels=labls)+
+    geom_sankey_label(size = 3.6, color = 1, fill = "white") +
+    labs(title = ttl) +
+    theme_sankey(base_size = 9) +
+    theme(legend.position = "none",
+          axis.title.x = element_blank(),
+          axis.text.x = element_text(size = 15, face = bp_face))
+  
+}
+
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Generate sankey plots comparing SingleR fine stage to scmap field stage
+imap(singleR_scmap_df_snky, ~snk_pt_fn(., strns_2_plt = c("sR_fine_stg", "stage_fld"), labls = c("SingleR", "scmap"), bp_face = c("bold", "bold"), ttl = .y, strain_colours = sp_col_new_abrv))
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+# Generate sankey plots comparing SingleR coarse stage to scmap coarse stage
+imap(singleR_scmap_df_snky, ~snk_pt_fn(., strns_2_plt = c("sR_stage_afm", "stage_afm"), labls = c("SingleR", "scmap"), bp_face = c("bold", "bold"), ttl = .y, strain_colours = sp_col_new_abrv))
+
+```
+
+
+```{r}
+# Summarize agreement between SingleR and scmap as percentage table for heatmap plotting
+df_counts <-singleR_scmap_df_snky %>%
+  bind_rows(.id = "donor") %>%
+  filter(!str_detect(donor, "MSC12")) %>%
+  filter(sR_stage_afm %in% c("Asexual", "Female", "Male")) %>%
+  filter(stage_afm %in% c("Asexual", "Female", "Male")) %>%
+  group_by(donor, sR_stage_afm, stage_afm) %>%
+  summarise(Count = n(), .groups="drop") %>% 
+  group_by(donor) %>%
+  mutate(Pct = Count / sum(Count)) %>%
+  mutate(sR_don_stg = str_remove_all(paste0(donor, sR_stage_afm), "SC|sexual|emale|ale|cbendr"), 
+         scmap_don_stg = str_remove_all(paste0(donor, stage_afm), "SC|sexual|emale|ale|cbendr")) %>% 
+  pivot_wider(id_cols = scmap_don_stg, names_from = c(sR_don_stg), values_from = Pct, values_fill = 0)
+
+```
+
+```{r, fig.width=12, fig.height=10}
+# Plot faceted heatmaps
+df_counts  %>%
+  column_to_rownames("scmap_don_stg") %>%
+  t() %>%
+  ComplexHeatmap::Heatmap(., cluster_rows = F, cluster_columns = F, show_column_names = T, show_row_names = T)
+```
+
+
+################################################## END - Compare scmap with singleR ##############
+
+## Write out stages for stage-specific pseudobulk genotyping
+
+Purpose: save harmonized stage labels to disk for downstream pseudobulk genotyping and integration with souporcell.
+```{r, eval = T}
+all_seu_prelim_stg_norm_cb_mdata <- map(multi_ref_stg_tbl2_slct, ~.x %>% rownames_to_column("bcode") %>% select(bcode, stage_fld, stage_afm, stage_ag)) 
+
+species <- "Pf"
+sv_dir <- "pbulk_gtypes_preQC_resc"
+system(paste0("mkdir -p data/processed/", species, "/" , sv_dir, "/m2_all"))
+
+saveRDS(all_seu_prelim_stg_norm_cb_mdata, paste0("data/processed/", species, "/m2_all/all_seu_prelim_stg_norm_cb_mdata.RDS"))
+# saveRDS(all_seu_prelim_stg_norm_cb_mdata, paste0("data/processed/", species, "/" , sv_dir, "/all_seu_prelim_stg_norm_cb_mdata.RDS"))
+
+```
+
+
+
+```{r, eval = T}
+map(all_seu_prelim_stg_norm_cb_mdata, ~.x %>% count(stage_ag, stage_afm, stage_fld)) 
+```
+
+### Add annotations to Seurat object
+Purpose: add preliminary stage metadata back to Seurat objects so downstream normalization and analyses retain stage labels.
+
+```{r}
+## Adding stage annotations to query cells
+all_seu_prelim_stg <- list(all_seu, all_pref_pred_df_fnl[str_remove(names(all_seu), "3$")], multi_ref_stg_tbl2_slct[str_remove(names(all_seu), "3$")]) %>%
+  pmap(~ ..2 %>%
+         column_to_rownames("bcode") %>%
+         AddMetaData(..1, .) %>%
+         AddMetaData(., ..3) 
+  )
+
+```
+
+
+```{r}
+all_seu_prelim_stg %>% map(., ~.x@meta.data %>% count(stage_final2, combined_labs, sR_fine_stg) )
+
+```
+
+```{r}
+all_seu_prelim_stg %>% map(., ~.x@meta.data %>% count(stage_final2, sR_fine_stg))
+
+
+```
+
+```{r}
+all_seu_prelim_stg %>% map(., ~.x@meta.data %>% 
+                             count(stage_final2, combined_labs, sR_fine_stg) %>% 
+                             filter(str_detect(sR_fine_stg, "LE"))
+)
+
+```
+
+
+```{r, eval=T}
+## write out seurat bpcells object files for normalization processing in farm
+imap(all_seu_prelim_stg, ~saveRDS(.x, paste0("data/processed/Pf/",.y, "/seu_obj/bp_prelim_stg.RDS")))
+
+```
+
+## Compare the original sct object that was shared with talleh to the new seurat object that was created with the same counts and meta.data but with the new stage annotations to check that the stage annotations are the same between the two objects
+
+```{r, eval=T}
+msc49_ta19_counts <- Read10X("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/raw/Pf/old_objects_generated_by_jr/msc49_qcd_all_input")
+msc49_ta19_counts
+```
+
+```{r, eval=T}
+## read the m49 sct object that was shared with talleh
+msc49_sct_ta19 <- readRDS("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/raw/Pf/old_objects_generated_by_jr/msc49_sct_ta19.RDS")
+msc49_sct_ta19
+```
+
+```{r, eval=T}
+## Add the meta.data object from the old sct object to the seurat object but do not add the nfeature and ncount columns since these were calculate including human genes in the old dataset
+msc49_ta19 <- CreateSeuratObject(counts = msc49_ta19_counts, meta.data = msc49_sct_ta19@meta.data %>% select(-c(nFeature_RNA, nCount_RNA)))
+msc49_ta19@reductions$umap <- msc49_sct_ta19@reductions$umap
+```
+
+```{r, eval=T}
+saveRDS(msc49_ta19, "data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
+```
+
+```{r, eval=T}
+all_seu_prelim_stg[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% left_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
+
+all_seu_prelim_stg[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(sR_fine_stg_nw, sR_fine_stg_old)
+```
+
