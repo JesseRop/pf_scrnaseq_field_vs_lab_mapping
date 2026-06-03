@@ -89,10 +89,8 @@ knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr
 #### Source common functions, variables and tables
 ```{r}
 ##Boxplot labeling function
-source("/nfs/users/nfs_j/jr35/multipurpose_scripts/seurat_sce/seu_sce_common_fns.R")
-source("/nfs/users/nfs_j/jr35/multipurpose_scripts/plotting_common_fns.R")
-source("/nfs/users/nfs_j/jr35/Mali2/mali22_code/pf_common_vars.R")
-
+source("~/Talleh_code/pf_common_vars.R")
+source("~/Talleh_code/project_common_fns.R")
 ```
 
 ## Read in sample name details
@@ -111,80 +109,6 @@ bp_prelim_stg <- list.files("data/processed/Pf", pattern = "bp_prelim_stg.RDS$",
   .[sample_name] %>%
   map(readRDS)
 ```
-
-
-```{r, eval=F}
-# ## !!! NOTE - SCT in farm
-# ## Alternative to run SCT in farm since it take long here
-# 
-# gogo()
-# # bsub < /lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/mali22_code_lnk/bash_scripts/submsn_seu_norm_CbEdCr_bsub.sh
-# # bsub < /lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Mali2/mali22_code_lnk/bash_scripts/submsn_seu_norm_sct_CbEdCr_bsub.sh
-# 
-# # --input_seu "/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/data/processed/Pf/MSC*/seu_obj/bp_prelim_stg.RDS" \
-# # : "${HVG:=500}"
-# # : "${CLUSTER_RESOLN:=0.5}"
-# 
-# 
-# ## Get mdata file list
-# all_seu_prelim_stg_sct_list_files <- Sys.glob("data/processed/Pf/*/seu_obj/bp_prelim_stg_sct.RDS")
-# 
-# all_seu_prelim_stg_sct_list_files
-# 
-# ## read filtered barcodes
-# all_seu_prelim_stg_sct <- map(all_seu_prelim_stg_sct_list_files, ~.x %>% 
-#                                 set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj.*')))) %>% 
-#   unlist(., recursive = F) %>% 
-#   .[sample_name] %>%
-#   .[!is.na(.)] %>%
-#   map(readRDS) 
-
-```
-
-```{r, eval=T}
-# ## !!! NOTE - Function to run SCT within this notebook instead of farm
-
-HVG <- 500
-UMAP_NM <- "umap"
-RESOLN <- 0.5
-CL_NM <- "seurat_clusters"
-UMAP_REDCTN_NM <- "umap"
-REDCTN <- "pca"
-INTEGRTD_PC30 <- "no"
-FINDPC_MTHD <- "perpendicular line"
-
-sct_run_fn <- function(Seurat_object, hvg = HVG){
-  
-  ## Set assay for seurat object
-  DefaultAssay(Seurat_object) <- "RNA"
-  
-  ## Runs SCT normalisation
-  Seurat_object <- SCTransform(Seurat_object, vst.flavor = "v2", verbose = FALSE, variable.features.n = hvg, return.only.var.genes = FALSE) ## Added return.only.var.genes = FALSE on 30 March 2025 to ensure all genes are returned in data
-  Seurat_object <- RunPCA(Seurat_object, verbose = F)
-  
-  sdev <- prcomp(t(Seurat_object@reductions$pca@cell.embeddings),scale. = T)$sdev[1:30]
-  sdev <- sort(sdev, decreasing = TRUE)
-  # npc <- findPC(sdev = sdev, number = 30, figure = T,method = 'all',aggregate = 'voting')
-  npc <- findPC(sdev = sdev, number = 30, figure = T, method = FINDPC_MTHD)
-  
-  
-  print(last_plot())
-  
-  npc <- ifelse(as.numeric(npc) < 5, 5, as.numeric(npc))
-  npc <- ifelse(INTEGRTD_PC30 == "yes", 30, npc)
-  
-  print(npc)
-  
-  ## Run UMAP 
-  Seurat_object <- RunUMAP(Seurat_object, reduction = REDCTN, dims = 1:npc, n.components = 3L, verbose=F, seed.use = 949, reduction.key = UMAP_NM, reduction.name = UMAP_REDCTN_NM)
-  Seurat_object <- FindNeighbors(Seurat_object, reduction = REDCTN, dims = 1:npc, verbose = FALSE)
-  Seurat_object <- FindClusters(Seurat_object, resolution = RESOLN, verbose = FALSE, cluster.name = CL_NM)
-  
-  DefaultAssay(Seurat_object) <- "RNA"
-
-}
-```
-
 
 
 ```{r, eval=T}
@@ -386,7 +310,7 @@ mt_filt_rm_bcodes <- map2(all_seu_prelim_stg_norm, mt_filt, ~colnames(subset(.x,
 
 ```{r, eval=T}
 ## Generated in ~/mali22_code_lnk/for_talleh_mapping_analysis/m2_prelim_stg_annotn_ta19.Rmd
-msc49_ta19 <- readRDS(msc49_ta19, "data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
+msc49_ta19 <- readRDS("data/processed/Pf/MSC49/seu_obj/msc49_ta19.RDS")
 ```
 
 ```{r, eval=T}
