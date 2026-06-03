@@ -1,0 +1,333 @@
+---
+title: "MSC QC and preprocessing"
+date: '2022-07-11'
+author: 'Jesse Rop'
+output:
+  html_document:
+    toc: true
+    theme: united
+    code_folding: hide
+    df_print: paged
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(patchwork)
+  library(ggrepel)
+  library(ggpubr)
+  library(dplyr) 
+  library(stringr)
+  library(purrr)
+  library(readr)
+  library(tibble)
+  library(ggplot2)
+  library(tidyr)
+  library(ggvenn)
+  library(conflicted)
+  
+  conflict_prefer("select", "dplyr")
+  conflict_prefer("filter", "dplyr")
+  conflict_prefer("rename", "dplyr")
+  conflict_prefer("map", "purrr")
+  conflict_prefer("count", "dplyr")
+  conflicts_prefer(base::saveRDS)
+  conflicts_prefer(SingleCellExperiment::colData)
+  conflicts_prefer(base::as.data.frame)
+  conflicts_prefer(base::intersect)
+  conflicts_prefer(base::setdiff)
+  conflicts_prefer(dplyr::desc)
+  conflicts_prefer(dplyr::count)
+  conflicts_prefer(dplyr::vars)
+})
+```
+
+
+
+# MSC Preprocessing
+
+## setup, read input files and exploratory visualizations and general functions
+
+```{r, setup}
+knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh')
+
+```
+
+### Variable declarations
+
+### Common functions
+
+#### Source commong functions, varriables and tables
+```{r}
+##Boxplot labeling function
+source("~/Talleh_code/pf_common_vars.R")
+source("~/Talleh_code/project_common_fns.R")
+
+```
+
+
+Visualizations and tabulations for Tallehs dataset for assesment
+
+```{r, eval=T}
+## Save asexual cells for Talleh
+msc49_sct_asx_domStrainSC2_ta19 <- readRDS("data/raw/Pf/MSC49/alt_qcd_objects/msc49_sct_asx_domStrainSC3_ta19.RDS")
+
+msc49_sct_ta19 <- readRDS("data/raw/Pf/MSC49/alt_qcd_objects/msc49_sct_ta19.RDS")
+
+```
+
+
+```{r, eval=T}
+msc49_sct_ta19@assays$RNA
+```
+
+
+
+```{r, eval=T}
+cb_mdata_orig <- read_csv("data/raw/Pf/MSC49/cbender/cb_mdata.csv")
+```
+
+```{r, eval=T}
+cb_mdata_orig_set_m49ta <-  cb_mdata_orig %>% filter(barcode %in% colnames(msc49_sct_ta19))
+```
+
+
+```{r, eval=T}
+summary(cb_mdata_orig_set_m49ta$background_fraction)
+summary(cb_mdata_orig_set_m49ta$cell_probability)
+
+```
+
+
+
+```{r, message=F, warning=F}
+##Read qcd dataset qcd by me
+## Combined JC + non-JC
+all_msc_qcd_anotd_m49C <- readRDS("data/raw/Pf/MSC49/alt_qcd_objects/cln_anotd3_jc_combind_norm.RDS")
+
+## JC only
+all_msc_qcd_anotd_m49 <- readRDS("data/raw/Pf/MSC49/alt_qcd_objects/cln_anotd3_norm.RDS")
+
+## New JC only
+msc49_cb_no_dbt_sct <- readRDS("data/processed/Pf/MSC49/seu_obj/all_cb_no_dbt_sct.RDS")
+msc49_cb_no_dbt_sct$Stage <- msc49_cb_no_dbt_sct$sR_fine_stg
+```
+
+
+```{r, eval=T}
+all_msc_qcd_anotd_m49@assays$RNA
+```
+
+```{r, eval=T}
+all_msc_qcd_anotd_m49C$Stage <- all_msc_qcd_anotd_m49C$stage_fld 
+all_msc_qcd_anotd_m49C$Strain <- all_msc_qcd_anotd_m49C$Strain_DN 
+
+all_msc_qcd_anotd_m49$Stage <- all_msc_qcd_anotd_m49$stage_fld 
+all_msc_qcd_anotd_m49$Strain <- all_msc_qcd_anotd_m49$Strain_DN 
+
+```
+
+## cells in Talleh's dataset that are in Jesse dataset
+```{r, eval=T}
+table(colnames(msc49_sct_ta19) %in% colnames(all_msc_qcd_anotd_m49C))
+table(colnames(msc49_sct_ta19) %in% colnames(all_msc_qcd_anotd_m49))
+```
+
+```{r, eval=T}
+## Cells in Tallehs dataset
+msc49_sct_ta19$qc_dset <- ifelse(colnames(msc49_sct_ta19) %in% colnames(all_msc_qcd_anotd_m49C) , "talleh_n_jesse", "talleh_only" )
+all_msc_qcd_anotd_m49C$qc_dset <- ifelse(colnames(all_msc_qcd_anotd_m49C) %in% colnames(msc49_sct_ta19) , "talleh_n_jesse", "jesse_only" )
+all_msc_qcd_anotd_m49$qc_dset <- ifelse(colnames(all_msc_qcd_anotd_m49) %in% colnames(msc49_sct_ta19) , "talleh_n_jesse", "jesse_only" )
+msc49_cb_no_dbt_sct$qc_dset <- ifelse(colnames(msc49_cb_no_dbt_sct) %in% colnames(msc49_sct_ta19) , "talleh_n_jesse", "jesse_only" )
+
+```
+
+```{r, eval=T}
+msc49_dsets <- list(all_msc_qcd_anotd_m49C, all_msc_qcd_anotd_m49, msc49_sct_ta19, msc49_cb_no_dbt_sct) %>% set_names(c("m49_JRcombnd", "m49_JR", "m49_TA", "m49_TA_new"))
+
+```
+
+
+```{r, eval=T}
+map(msc49_dsets, ~.x@meta.data %>% count(mthds_union))
+```
+
+```{r, eval=T}
+map(msc49_dsets, ~.x@meta.data %>% count(Strain))
+
+```
+
+```{r, eval=T}
+map(msc49_dsets, ~.x@meta.data %>% count(Stage))
+
+```
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=3.5}
+
+msc49_dsets <- map(msc49_dsets, ~.x@meta.data %>% 
+  mutate(stage_ag = ifelse(str_detect(Stage,"ale"), "Sexual", "Asexual"),
+         stage_afm = case_when(str_detect(Stage,"Female") ~ "Female",
+                               str_detect(Stage,"Male") ~ "Male",
+                               T ~ "Asexual"),
+         Strain = Strain_DN) %>% 
+  select(stage_ag, stage_afm, Strain) %>%
+  AddMetaData(.x, .)
+)
+
+```
+
+
+## asexual strains in Talleh's dataset that are in Jesse dataset and vice versa
+```{r, eval=T}
+map(msc49_dsets, ~.x@meta.data %>% filter(stage_afm == "Asexual") %>% count(Strain, qc_dset)) 
+```
+
+```{r, eval=T}
+map(msc49_dsets, ~.x@meta.data %>% filter(stage_afm == "Asexual") %>% count(qc_dset)) 
+```
+
+```{r, eval=T}
+map(msc49_dsets, ~.x@meta.data %>% count(qc_dset)) 
+```
+
+```{r, warning=FALSE, message=FALSE}
+map(msc49_dsets, ~.x@meta.data %>% count(stage_ag, Strain_DN) %>% group_by(stage_ag) %>% mutate(prop_n = round(n/sum(n), 2)))
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+ta_asexuals <- msc49_dsets[["m49_TA"]]@meta.data %>% filter(stage_ag == "Asexual" & Strain_DN == "SC3") %>% rownames()
+jr_asexuals <- msc49_dsets[["m49_JRcombnd"]]@meta.data %>% filter(stage_ag == "Asexual" & Strain_DN == "SC2") %>% rownames()
+
+ta_jr_comp <- list(overlap = intersect(ta_asexuals, jr_asexuals),
+     only_TA = setdiff(ta_asexuals, jr_asexuals),
+     only_JR = setdiff(jr_asexuals, ta_asexuals))
+
+map(ta_jr_comp, length)
+```
+```{r, warning=FALSE, message=FALSE}
+ta_asexuals <- msc49_dsets[["m49_TA"]]@meta.data %>% filter(stage_ag == "Asexual" & Strain_DN == "SC3") %>% rownames()
+ta_replicate_asexuals <- msc49_dsets[["m49_TA_new"]]@meta.data %>% filter(stage_ag == "Asexual" & Strain_DN == "SC2") %>% rownames()
+
+ta_taRep_comp <- list(overlap = intersect(ta_asexuals, ta_replicate_asexuals),
+     only_TA = setdiff(ta_asexuals, ta_replicate_asexuals),
+     only_JR = setdiff(ta_replicate_asexuals, ta_asexuals))
+
+map(ta_taRep_comp, length)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+msc49_dsets_mrg_mdata <- map2(msc49_dsets, str_remove(names(msc49_dsets), "m49"), function(obj, nm) obj@meta.data %>% rename_with(~paste0(., nm), everything()) %>% rownames_to_column("bcode")) %>% purrr::reduce(., full_join, by = "bcode") 
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+## Are the asexual SC3 strains used by Talleh similar to the strain assignments in Jesse's dataset
+msc49_dsets_mrg_mdata %>% filter(stage_ag_TA == "Asexual" & Strain_TA == "SC3") %>% count(Strain_TA, Strain_JR, stage_ag_JR)
+msc49_dsets_mrg_mdata %>% filter(stage_ag_TA == "Asexual" & Strain_TA == "SC3") %>% count(Strain_TA, Strain_JRcombnd, stage_ag_JRcombnd)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+## Are the asexual SC3 strains used by Talleh called in a similar manner, in terms of cellranger assignments, in both datasets 
+msc49_dsets_mrg_mdata %>% filter(stage_ag_TA == "Asexual" & Strain_TA == "SC3") %>% count(mthds_union_TA, mthds_union_JRcombnd)
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+## Remove the negatives which were retained in Jesse's dataset
+msc49_dsets_no_neg <- map(msc49_dsets, ~subset(.x, Strain != "Negative"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+map(msc49_dsets_no_neg, ~DimPlot(.x, dims = c(1,3), group.by = "Stage", pt.size = 0.4)+ scale_color_manual(values = sp_fld_colors2))
+map(msc49_dsets_no_neg, ~DimPlot(.x, dims = c(1,2), group.by = "Stage", pt.size = 0.4)+ scale_color_manual(values = sp_fld_colors2))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+map(msc49_dsets_no_neg, ~DimPlot(.x, dims = c(1,2), group.by = "qc_dset", pt.size = 0.4))
+map(msc49_dsets_no_neg, ~DimPlot(.x, dims = c(1,2), split.by = "qc_dset", pt.size = 0.4))
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+map(msc49_dsets_no_neg, ~DimPlot(.x, dims = c(1,2), cells.highlight = colnames(msc49_sct_ta19[, msc49_sct_ta19$Stage== "Gametocyte (developing)"])) )
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+map(msc49_dsets_no_neg, ~FeaturePlot(.x, dims = c(1,2), features = "PF3D7-1222600", order = T, pt.size = 0.4))
+```
+
+```{r, warning=FALSE, message=FALSE}
+map(msc49_dsets_no_neg, ~VlnPlot(.x, features = "PF3D7-1222600", group.by = "Stage", pt.size = 0.01, slot = "data", layer = "RNA"))
+map(msc49_dsets_no_neg, ~VlnPlot(.x, features = "PF3D7-1102500", group.by = "Stage", pt.size = 0.01, slot = "data", layer = "RNA"))
+
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.width=15, fig.height=4}
+
+don_clst_strn_barplot <- function(dset, count_var, facets, label_var, y_lab = 'Counts' ) {
+  ggplot(dset, aes(x = Strain, y = !!rlang::sym(count_var), fill = Strain)) +
+  geom_col(position = position_dodge2()) + #width=0.4, position = position_dodge(width=0.5) 
+  geom_text(aes(label=!!rlang::sym(label_var)), hjust=-0.05, vjust= 0.5, position = position_dodge(width = .9), size = 5, show.legend = F, fontface ='bold', angle = 90) +
+  scale_fill_manual(values = strain_cols_n) +
+  ggh4x::facet_nested_wrap(vars(!!!syms(facets)),  nrow = 1, scales = "free_x")+
+  scale_y_continuous(expand = expansion(mult = c(0.01, 0.55))) +
+  scale_x_discrete(expand = expansion(add = c(1, 1))) +
+  theme_classic() +
+  labs( y = y_lab)+
+  theme(
+    axis.text.y  = element_text(size = 14),
+    axis.title.y  = element_text(size = 17, face = "bold"),
+    axis.text.x  = element_text(size = 14, face = "bold", angle = 90),
+    # axis.title.x = element_blank(),
+    axis.title.x = element_text(size = 17, face = "bold"),
+    legend.text = element_text(size = 17),
+    legend.title = element_text(size = 17, face = "bold"),
+    legend.position="bottom",
+    strip.text =element_text(size=16,face="bold", colour = 'black'),
+    panel.border=element_rect(colour="black",fill='transparent')
+  ) + 
+  guides(fill = guide_legend(title.position = 'left', nrow = 1, name = 'Strain'))
+}
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=3.5}
+
+map(msc49_dsets_no_neg, ~.x@meta.data %>% 
+  count(stage_ag, Strain) %>% 
+  group_by(stage_ag) %>% 
+  mutate(prop_n = round(n/sum(n), 2)) %>% 
+  don_clst_strn_barplot(., count_var = "prop_n", label_var= "n", facets =c("stage_ag"), y_lab = "Proportion")
+)
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=3.5}
+
+map(msc49_dsets_no_neg, ~.x@meta.data %>% 
+  count(stage_ag, Strain) %>% 
+  group_by(stage_ag) %>% 
+  mutate(prop_n = round(n/sum(n), 2)) %>% 
+  don_clst_strn_barplot(., count_var = "n", label_var= "prop_n", facets =c("stage_ag"))
+)
+```
+
+```{r, warning=FALSE, message=FALSE, fig.width=6, fig.height=3.5}
+
+map(msc49_dsets_no_neg, ~.x@meta.data %>% 
+  count(stage_afm, Strain) %>% 
+  group_by(stage_afm) %>% 
+  mutate(prop_n = round(n/sum(n), 2)) %>% 
+  don_clst_strn_barplot(., count_var = "n", label_var= "prop_n", facets =c("stage_afm"))
+)
+```
+
+
