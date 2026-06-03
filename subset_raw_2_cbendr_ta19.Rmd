@@ -163,7 +163,7 @@ pf_hs_gene_sum_fn <- function(seurat_obj){
   print(head(hs_genes))
   
   # Extract expression matrix and subset to those genes
-   
+  
   pf_matrix <- as(GetAssayData(seurat_obj, layer = "counts")[pf_genes, , drop = FALSE], Class = "dgCMatrix")  
   hs_matrix <- as(GetAssayData(seurat_obj, layer = "counts")[hs_genes, , drop = FALSE], Class = "dgCMatrix")  
   
@@ -172,7 +172,7 @@ pf_hs_gene_sum_fn <- function(seurat_obj){
   hs_umi_count <- colSums(hs_matrix)
   pf_gn_count <- colSums(pf_matrix > 0)
   hs_gn_count <- colSums(hs_matrix > 0)
-
+  
   # Store in metadata
   seurat_obj[["pf_umi_count"]] <- pf_umi_count
   seurat_obj[["hs_umi_count"]] <- hs_umi_count
@@ -193,7 +193,7 @@ pf_hs_gene_sum_fn <- function(seurat_obj){
 ##write out for normalization processing in farm
 
 for (i in 1:length(sample_name)) {
-## Create new directories
+  ## Create new directories
   system(paste0('mkdir -p data/processed/Pf/', sample_name[i], '/seu_obj'))
   # system(paste0('rm data/processed/Pf/', sample_name[i], '/seu_obj/*'))
 }
@@ -272,19 +272,19 @@ cranger_bcodes <- map(cranger_bcodes, ~.x %>% mutate(is_cell_cr = "Cr"))
 ```{r}
 ## Create a column summarising the agreement of call methods for each cell - called 'mthds_union'
 cr_cbender_mdata_uni <- map2(cbender_pf100_mdata, cranger_bcodes[names(cbender_pf100_mdata)], ~.x %>%
-    full_join(., .y, by = c("barcode"="bcode")) %>%
-    mutate(cr = case_when(is_cell_cr == "Cr" ~ "Cell"),
-           cb = case_when(cell_probability > 0.5  ~ "Cell", cell_probability <= 0.5  ~ "nonCell"),
-           is_cell_cb = case_when(cell_probability > 0.5  ~ "Cb", cell_probability <= 0.5  ~ "nonCell"),
-           mthds_union = paste0(is_cell_cr, is_cell_cb)) %>%
-    mutate(across(starts_with("mthds_union"), ~case_when(
-      str_detect(., "Cb|Cr") ~ str_remove_all(., "nonCell|NA"),
-      !str_detect(., "Cb|Cr") ~ str_remove_all(., "NA"),
-      TRUE ~ .
-    ))) 
-    )
-         
-      
+                               full_join(., .y, by = c("barcode"="bcode")) %>%
+                               mutate(cr = case_when(is_cell_cr == "Cr" ~ "Cell"),
+                                      cb = case_when(cell_probability > 0.5  ~ "Cell", cell_probability <= 0.5  ~ "nonCell"),
+                                      is_cell_cb = case_when(cell_probability > 0.5  ~ "Cb", cell_probability <= 0.5  ~ "nonCell"),
+                                      mthds_union = paste0(is_cell_cr, is_cell_cb)) %>%
+                               mutate(across(starts_with("mthds_union"), ~case_when(
+                                 str_detect(., "Cb|Cr") ~ str_remove_all(., "nonCell|NA"),
+                                 !str_detect(., "Cb|Cr") ~ str_remove_all(., "NA"),
+                                 TRUE ~ .
+                               ))) 
+)
+
+
 ```
 
 
@@ -315,10 +315,10 @@ c_combos_cols <- ifelse(names(c_combos_cols) == "nonCell", "lightgrey", c_combos
 ```{r}
 ## Add umi count metadata and modify the cell call categories appropriately
 cr_cbender_mdata_slct_uni <- map2(cr_cbender_mdata_uni, all_msc_bp_raw_noHsGns_mdata[names(cr_cbender_mdata_uni)], ~.x %>%
-                               mutate(across(contains("mthds_union"), ~factor(str_replace_all(., c("CrCb" = "Cr_Cb")), levels = c_combos))) %>%
-                               left_join(., .y %>% select(contains("pf_"), contains("hs_")) %>% rownames_to_column("barcode"), by = "barcode")
-                             )
-         
+                                    mutate(across(contains("mthds_union"), ~factor(str_replace_all(., c("CrCb" = "Cr_Cb")), levels = c_combos))) %>%
+                                    left_join(., .y %>% select(contains("pf_"), contains("hs_")) %>% rownames_to_column("barcode"), by = "barcode")
+)
+
 ```
 
 
@@ -346,14 +346,14 @@ call_methods_overlap_barplot_fn(cr_cbender_mdata_slct_uni, "mthds_union", pf_umi
 ## Create the final cell call category to go forward with
 
 cr_cbender_mdata_slct_uni_pf100 <- map2(cr_cbender_mdata_slct_uni, cranger_bcodes[names(cr_cbender_mdata_slct_uni)], ~.x %>%
-    mutate(fnl_call = case_when(mthds_union %in%  c("Cr_Cb", "Cb") ~ "Cell",
-                                mthds_union == "Cr" ~ "other_calls",
-                                mthds_union == "nonCell" ~ "nonCell",
-                                T ~ "missing") ) %>%
-      filter(pf_umi_count >= 100)
+                                          mutate(fnl_call = case_when(mthds_union %in%  c("Cr_Cb", "Cb") ~ "Cell",
+                                                                      mthds_union == "Cr" ~ "other_calls",
+                                                                      mthds_union == "nonCell" ~ "nonCell",
+                                                                      T ~ "missing") ) %>%
+                                          filter(pf_umi_count >= 100)
 )
-         
-      
+
+
 ```
 
 ```{r}
@@ -369,7 +369,7 @@ resc_bcodes_hspf <- map(cr_cbender_mdata_slct_uni_pf100, ~{
   .x  %>%
     filter(fnl_call %in%  c("Cell")) %>% 
     pull(barcode) 
-  })  
+})  
 
 ```
 
@@ -389,7 +389,7 @@ imap(resc_bcodes_hspf, ~{
   system(paste0('mkdir data/processed/Pf/', .y, '/soupc_resc_hspf'))
   
   .x %>% write(., gzfile(paste0('data/processed/Pf/', .y, '/soupc_resc_hspf/barcodes.tsv.gz')))
-  }) 
+}) 
 ```
 
 Run souporcell like below for the filtered barcodes of pf in mixed infections
@@ -413,7 +413,7 @@ all_bp_raw_w_cbendr_mdata <- list(all_msc_bp_raw_noHsGns, cr_cbender_mdata_slct_
       column_to_rownames("barcode") %>%
       select(starts_with("cell_"), contains("background_fraction"), contains("droplet_efficiency"), mthds_union, fnl_call) %>%
       AddMetaData(..1, .)
-       })
+  })
 
 ```
 
@@ -421,7 +421,6 @@ all_bp_raw_w_cbendr_mdata <- list(all_msc_bp_raw_noHsGns, cr_cbender_mdata_slct_
 
 ```{r}
 all_bp_CbendrCr <- map(all_bp_raw_w_cbendr_mdata, ~subset(.x, subset = fnl_call == "Cell"))
-
 ```
 
 
@@ -448,13 +447,6 @@ cell_counts <- pmap(list(all_msc_bp_raw_noHsGns, all_msc_bp_filt_noHsGns, all_bp
 ```{r, eval=T}
 cell_counts
 ```
-
-```{r, eval=T}
-# gogo()
-```
-
-
-
 
 ```{r, eval=T}
 ## write out seurat bpcells object files for normalization processing in farm
