@@ -10,7 +10,7 @@ output:
     df_print: paged
 ---
 
-**Purpose:** This notebook performs preliminary stage annotation and QC for MSC samples. It loads packages, reads annotation outputs from SingleR and scmap, compares annotations, and writes stage labels for downstream pseudobulk genotyping. Keep code chunks unchanged.
+**Purpose:** This notebook compares the old dataset shared with Talleh and the new one to assess the discrepancies at each QC step
 
 ```{r}
 suppressPackageStartupMessages({
