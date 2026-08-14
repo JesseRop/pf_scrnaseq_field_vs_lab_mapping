@@ -1,0 +1,862 @@
+---
+title: "VCF Variant QC — cluster genotypes"
+date: '`r Sys.Date()`'
+author: 'Jesse Rop'
+output:
+  html_document:
+    toc: true
+    theme: united
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+## Overview
+
+Reads a souporcell cluster-genotype VCF, annotates variants against the Pf7 Mali
+reference panel, and retains a clean set of informative SNPs for downstream strain
+deconvolution.
+
+**Input FORMAT fields (souporcell):** `GT:AO:RO:T:E:GO:GN`
+(`DP`/`QR`/`QA` FORMAT fields are defined in the VCF header but absent from variant rows;
+per-sample read counts are taken from `RO` and `AO`.)
+
+To knit from the command line:
+```{bash knit-cmd, eval=FALSE}
+module load HGI/softpack/groups/team222/Pf_scRNAseq/34
+# Edit the source() path in the params chunk to select the desired config, then:
+Rscript -e "rmarkdown::render('Talleh_code/vcf_variant_qc.Rmd')"
+```
+
+---
+
+## Libraries
+
+```{r libs}
+# Add softpack R library path so packages resolve whether or not the module
+# was loaded before this R session started
+.libPaths(c("/opt/view/rlib/R/library", .libPaths()))
+
+suppressPackageStartupMessages({
+  library(SeqArray)
+  library(Matrix)
+  library(data.table)
+  library(dplyr)   # loaded after data.table so dplyr verbs take precedence
+  library(stringr)
+  library(purrr)
+  library(tidyr)
+  library(ggplot2)
+  library(tibble)
+})
+```
+
+## Parameters
+
+```{r params}
+# Change this path to switch iterations — each config file sets all run-specific variables.
+source("/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh/Talleh_code/configs/run_pbulk_postQC.R")
+```
+
+```{r load-strn-df}
+# Load QC'd strain labels early so vartrix aggregation can be restricted to these barcodes.
+strn_raw <- readRDS(label_rds)
+strn_df  <- if (is.null(label_element)) strn_raw else strn_raw[[label_element]]
+
+cat("Strain label barcodes loaded:", nrow(strn_df), "\n")
+```
+
+---
+
+## 1. VCF → GDS
+
+```{r vcf2gds}
+if (!file.exists(gds_path)) {
+  seqVCF2GDS(vcf_path, gds_path, storage.option = "ZIP_RA")
+}
+
+gds <- seqOpen(gds_path, allow.duplicate = TRUE)
+```
+
+```{r dry-run-filter}
+if (DRY_RUN) {
+  n_total <- length(seqGetData(gds, "variant.id"))
+  # Sample randomly so dry-run variants are spread across all chromosomes,
+  # not just the first chromosome (VCF is position-sorted).
+  set.seed(42L)
+  sel <- sort(sample(n_total, min(N_DRY, n_total)))
+  seqSetFilter(gds, variant.sel = sel)
+  message("DRY RUN: processing ", length(sel), " of ", n_total, " variants (random sample)")
+}
+```
+
+---
+
+## 2. Extract variant matrix
+
+```{r extract-matrix}
+filt_raw <- seqGetData(gds, "annotation/filter")
+filt_vec <- if (is.matrix(filt_raw)) {
+  apply(filt_raw, 1, function(x) paste(colnames(filt_raw)[x], collapse = ";"))
+} else {
+  filt_raw
+}
+
+sample_ids <- seqGetData(gds, "sample.id") |>
+  str_replace_all(c(
+    "PoorQC"     = "P",
+    "Low_n"      = "Lo",
+    "Female"     = "F",
+    "Male"       = "M",
+    "Asexual"    = "A",
+    "Gametocyte" = "G"
+  ))
+
+# dosage and per-sample RO/AO are (n_samples × n_variants) matrices;
+# after rbind + t() each row is one variant with all sample columns appended
+raw_mat <- rbind(
+  seqGetData(gds, "allele"),
+  seqGetData(gds, "annotation/qual"),
+  seqGetData(gds, "chromosome"),
+  seqGetData(gds, "position"),
+  seqGetData(gds, "annotation/info/DP"),
+  filt_vec,
+  seqGetData(gds, "$dosage"),
+  seqGetData(gds, "annotation/format/RO"),
+  seqGetData(gds, "annotation/format/AO")
+) |>
+  t() |>
+  as.data.frame() |>
+  setNames(c(
+    "alleles", "quality", "chrom", "pos", "depth", "vcf_filter",
+    sample_ids,
+    paste0(sample_ids, "_RefN"),
+    paste0(sample_ids, "_AltN")
+  ))
+
+variants <- as_tibble(raw_mat) |>
+  mutate(
+    quality = as.numeric(quality),
+    pos     = as.integer(pos),
+    depth   = as.integer(depth),
+    across(all_of(sample_ids), as.integer),
+    across(ends_with("_RefN"), as.integer),
+    across(ends_with("_AltN"), as.integer)
+  )
+
+cat("Variants read:", nrow(variants), "\n")
+```
+
+---
+
+## 3. Vartrix per-cluster read aggregation
+
+Replaces the aggregate VCF-level dosage calls with per-cluster counts derived by
+summing raw per-cell ref/alt reads from the vartrix matrices. Haploid genotypes are
+called from the cluster-aggregated allele fractions using coverage and purity
+thresholds. Variants with no matching position in the vartrix VCF retain their
+original GDS calls.
+
+```{r vartrix-refine}
+# Load vartrix sparse matrices (variant × cell)
+alt_mat <- readMM(file.path(vartrix_dir, "alt.mtx"))
+ref_mat <- readMM(file.path(vartrix_dir, "ref.mtx"))
+
+# Column → barcode mapping (same order as barcodes.tsv)
+bc_order <- fread(file.path(vartrix_dir, "barcodes.tsv"),
+                  header = FALSE, col.names = "barcode")$barcode
+
+# Cluster assignments — singlets, doublets, and unassigned
+# Restricted to barcodes present in strn_df (QC-passing cells only).
+cluster_assign <- fread(clusters_path) |>
+  as_tibble() |>
+  mutate(cluster = case_when(
+    status == "singlet"    ~ assignment,
+    status == "doublet"    ~ "doublet",
+    TRUE                   ~ "unassigned"
+  )) |>
+  select(barcode, cluster) |>
+  semi_join(strn_df, by = c("barcode" = label_bcode_col))
+
+cat("Barcodes retained after strn_df filter:", nrow(cluster_assign), "\n")
+
+cluster_ids <- sort(unique(cluster_assign$cluster))
+
+# Sum sparse-matrix columns for each cluster's member cells
+agg_counts <- function(mat, cid) {
+  idx <- which(bc_order %in% cluster_assign$barcode[cluster_assign$cluster == cid])
+  rowSums(mat[, idx, drop = FALSE])
+}
+agg_alt <- map(cluster_ids, agg_counts, mat = alt_mat)
+agg_ref <- map(cluster_ids, agg_counts, mat = ref_mat)
+
+# Haploid caller: 1 = ALT, 0 = REF, NA = below depth or ambiguous
+call_gt_vt <- function(a, r) {
+  total <- a + r
+  frac  <- a / total
+  as.integer(case_when(
+    total < vt_min_reads   ~ NA_integer_,
+    frac  >= vt_alt_thresh ~ 1L,
+    frac  <= vt_ref_thresh ~ 0L,
+    TRUE                   ~ NA_integer_
+  ))
+}
+
+dosage_vt <- map_dfc(
+  seq_along(cluster_ids),
+  \(i) tibble(!!as.character(cluster_ids[i]) := call_gt_vt(agg_alt[[i]], agg_ref[[i]]))
+)
+
+# Variant-row alignment: vartrix rows follow order of souporcell_merged_sorted_vcf.vcf.gz
+vcf_pos <- fread(
+  cmd       = sprintf("zcat %s | grep -v '^#' | cut -f1,2",
+                      file.path(vartrix_dir, "souporcell_merged_sorted_vcf.vcf.gz")),
+  col.names = c("chrom", "pos")
+) |>
+  as_tibble() |>
+  mutate(pos = as.integer(pos), vt_row = row_number())
+
+row_map <- variants |>
+  mutate(v_row = row_number()) |>
+  inner_join(vcf_pos, by = c("chrom", "pos"))
+
+# Add columns for extra clusters (doublet, unassigned); initialise as NA, fill from vartrix
+extra_ids <- setdiff(cluster_ids, sample_ids)
+for (eid in extra_ids) variants[[eid]] <- NA_integer_
+
+# Overwrite/fill dosage columns; singlet unmatched variants retain their GDS call
+for (sid in cluster_ids) {
+  variants[[sid]][row_map$v_row] <- dosage_vt[[sid]][row_map$vt_row]
+}
+
+sample_ids <- c(sample_ids, extra_ids)
+
+cat("Vartrix-refined:", nrow(row_map), "variants |",
+    "Unmatched (GDS calls kept):", nrow(variants) - nrow(row_map), "\n")
+```
+
+```{r vartrix-call-qc, fig.width=10, fig.height=4}
+# For each vartrix-matched position × cluster, classify the call reason.
+# "Low support"  : total reads < vt_min_reads (no confident call possible)
+# "Low purity"   : reads present but alt fraction is ambiguous (het-like)
+# "Called"       : genotype called as REF or ALT
+classify_gt_reason <- function(a, r) {
+  total <- a + r
+  frac  <- ifelse(total > 0, a / total, NA_real_)
+  case_when(
+    total <  vt_min_reads                          ~ "Low support",
+    frac  >= vt_alt_thresh | frac <= vt_ref_thresh ~ "Called",
+    TRUE                                           ~ "Low purity"
+  )
+}
+
+vt_call_long <- map_dfc(
+  seq_along(cluster_ids),
+  \(i) tibble(!!cluster_ids[i] :=
+    classify_gt_reason(agg_alt[[i]][row_map$vt_row],
+                       agg_ref[[i]][row_map$vt_row]))
+) |>
+  pivot_longer(everything(), names_to = "cluster", values_to = "reason") |>
+  count(cluster, reason) |>
+  group_by(cluster) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup() |>
+  mutate(reason = factor(reason, levels = c("Called", "Low support", "Low purity")))
+
+REASON_COLS <- c(Called = "#4caf50", "Low support" = "#90a4ae", "Low purity" = "#e57373")
+
+p_vt_n <- vt_call_long |>
+  ggplot(aes(x = cluster, y = n, fill = reason)) +
+    geom_col(width = 0.7) +
+    geom_text(aes(label = ifelse(pct > 0.02, scales::comma(n), "")),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white") +
+    scale_fill_manual(values = REASON_COLS, name = NULL) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(x = NULL, y = "Variant × cluster calls (n)",
+         title = sprintf("Vartrix call outcome per cluster — count  (depth ≥ %d, purity thresholds %.1f / %.1f)",
+                         vt_min_reads, vt_ref_thresh, vt_alt_thresh)) +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "top")
+
+p_vt_pct <- vt_call_long |>
+  ggplot(aes(x = cluster, y = pct, fill = reason)) +
+    geom_col(width = 0.7) +
+    geom_text(aes(label = ifelse(pct > 0.02, scales::percent(pct, accuracy = 0.1), "")),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white") +
+    scale_fill_manual(values = REASON_COLS, name = NULL) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "Proportion",
+         title = "Vartrix call outcome per cluster — proportion") +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "top")
+
+p_vt_n
+p_vt_pct
+```
+
+---
+
+## 4. Annotate with Pf7 reference panel
+
+```{r pf7-annotate}
+pf7 <- fread(pf7_path, na.strings = ".") |>
+  as_tibble() |>
+  select(V1, V2, V3, V4, V11, V12, V13, V14, V15, V16, V17) |>
+  rename(
+    chrom      = V1,  pos    = V2,  ref    = V3,  alt    = V4,
+    pf7_filter = V11, type   = V12, VQSLOD = V13,
+    CDS        = V14, AC     = V15, AN     = V16, AF     = V17
+  ) |>
+  mutate(
+    pos    = as.integer(pos),
+    AF     = as.numeric(AF),
+    in_pf7 = TRUE
+  )
+
+variants <- left_join(variants, pf7, by = c("chrom", "pos"),
+                      relationship = "many-to-many")
+```
+
+---
+
+## 5. Resolve multiallelic sites
+
+Keep one record per position: rank SNP > INDEL > OVERLAP, then by descending Pf7 allele frequency.
+
+```{r resolve-multiallelic}
+variants <- variants |>
+  group_by(chrom, pos) |>
+  mutate(type = factor(type, levels = c("SNP", "INDEL", "OVERLAP"))) |>
+  arrange(type, desc(AF), .by_group = TRUE) |>
+  slice_head(n = 1) |>
+  ungroup()
+```
+
+---
+
+## 6. Hard QC filters
+
+```{r qc-filters}
+variants_qc <- variants |>
+  filter(
+    type       == "SNP",       # SNPs only
+    chrom      != MT_CHROM,    # exclude mitochondrial
+    quality    >= MIN_QUAL,    # site QUAL
+    depth      >= MIN_DEPTH,   # site read depth
+    !is.na(in_pf7),            # present in Pf7 panel (NA = absent after left_join)
+    pf7_filter == "PASS"       # passes Pf7 QC
+  )
+
+cat("After QC filters:", nrow(variants_qc), "\n")
+```
+
+```{r qc-locus-plots, fig.width=10, fig.height=4}
+# Label each variant with its first failing QC criterion
+FAIL_LEVELS <- c("PASS", "Not SNP", "Mitochondrial",
+                 paste0("QUAL < ", MIN_QUAL), paste0("Depth < ", MIN_DEPTH),
+                 "Not in Pf7", "Pf7 non-PASS")
+
+qc_labelled <- variants |>
+  mutate(
+    fail = case_when(
+      type       != "SNP"        ~ "Not SNP",
+      chrom      == MT_CHROM     ~ "Mitochondrial",
+      quality    <  MIN_QUAL     ~ paste0("QUAL < ", MIN_QUAL),
+      depth      <  MIN_DEPTH    ~ paste0("Depth < ", MIN_DEPTH),
+      is.na(in_pf7)              ~ "Not in Pf7",
+      pf7_filter != "PASS"       ~ "Pf7 non-PASS",
+      TRUE                       ~ "PASS"
+    ),
+    fail = factor(fail, levels = FAIL_LEVELS)
+  )
+
+FAIL_COLS <- setNames(
+  c("#4caf50", "#e57373", "#ff9800", "#9c27b0", "#2196f3", "#795548", "#607d8b"),
+  FAIL_LEVELS
+)
+
+# -- QC funnel: variant count remaining after each filter ---------------------
+funnel <- tibble(
+  stage = factor(
+    c("Extracted", "SNP only", "Nuclear",
+      paste0("QUAL ≥ ", MIN_QUAL), paste0("Depth ≥ ", MIN_DEPTH),
+      "In Pf7", "Pf7 PASS"),
+    levels = c("Extracted", "SNP only", "Nuclear",
+               paste0("QUAL ≥ ", MIN_QUAL), paste0("Depth ≥ ", MIN_DEPTH),
+               "In Pf7", "Pf7 PASS")
+  ),
+  n = c(
+    nrow(variants),
+    nrow(filter(variants, type == "SNP")),
+    nrow(filter(variants, type == "SNP", chrom != MT_CHROM)),
+    nrow(filter(variants, type == "SNP", chrom != MT_CHROM, quality >= MIN_QUAL)),
+    nrow(filter(variants, type == "SNP", chrom != MT_CHROM, quality >= MIN_QUAL,
+                depth >= MIN_DEPTH)),
+    nrow(filter(variants, type == "SNP", chrom != MT_CHROM, quality >= MIN_QUAL,
+                depth >= MIN_DEPTH, !is.na(in_pf7))),
+    nrow(variants_qc)
+  )
+)
+
+p_funnel <- ggplot(funnel, aes(x = stage, y = n, group = 1)) +
+  geom_line(colour = "#546e7a", linewidth = 0.9) +
+  geom_point(size = 3, colour = "#546e7a") +
+  geom_text(aes(label = scales::comma(n)), vjust = -0.9, size = 3) +
+  scale_y_continuous(labels = scales::comma,
+                     expand = expansion(mult = c(0.05, 0.2))) +
+  labs(x = NULL, y = "Variants retained", title = "QC filter funnel") +
+  theme_classic(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+# -- First-failing-criterion bar chart ----------------------------------------
+p_fail <- qc_labelled |>
+  count(fail) |>
+  ggplot(aes(x = reorder(fail, n), y = n, fill = fail)) +
+    geom_col(width = 0.7, show.legend = FALSE) +
+    geom_text(aes(label = scales::comma(n)), hjust = -0.1, size = 3.2) +
+    scale_fill_manual(values = FAIL_COLS) +
+    scale_y_continuous(labels = scales::comma,
+                       expand = expansion(mult = c(0, 0.18))) +
+    coord_flip() +
+    labs(x = NULL, y = "Variants (n)", title = "First failing QC criterion") +
+    theme_classic(base_size = 11)
+
+p_funnel
+p_fail
+```
+
+```{r qc-metric-dists, fig.width=10, fig.height=4}
+# -- Site QUAL distribution ---------------------------------------------------
+p_qual <- variants |>
+  filter(type == "SNP") |>
+  mutate(pass = quality >= MIN_QUAL) |>
+  ggplot(aes(x = pmin(quality, 100), fill = pass)) +
+    geom_histogram(binwidth = 2, boundary = 0, colour = NA) +
+    geom_vline(xintercept = MIN_QUAL, linetype = "dashed") +
+    scale_fill_manual(values = c("FALSE" = "#e57373", "TRUE" = "#4caf50"),
+                      labels = c("Fail", "Pass"), name = NULL) +
+    labs(x = "QUAL score (capped at 100)", y = "Variants",
+         title = paste0("Site quality distribution (threshold = ", MIN_QUAL, ")")) +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "top")
+
+# -- Site depth distribution --------------------------------------------------
+p_depth <- variants |>
+  filter(type == "SNP") |>
+  mutate(pass = depth >= MIN_DEPTH) |>
+  ggplot(aes(x = pmin(depth, 200L), fill = pass)) +
+    geom_histogram(binwidth = 5, boundary = 0, colour = NA) +
+    geom_vline(xintercept = MIN_DEPTH, linetype = "dashed") +
+    scale_fill_manual(values = c("FALSE" = "#e57373", "TRUE" = "#4caf50"),
+                      labels = c("Fail", "Pass"), name = NULL) +
+    labs(x = "Read depth (capped at 200)", y = "Variants",
+         title = paste0("Site depth distribution (threshold = ", MIN_DEPTH, ")")) +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "top")
+
+p_qual
+p_depth
+```
+
+```{r vartrix-call-qc-postfilt, fig.width=10, fig.height=4}
+# Restrict to vartrix-matched positions that also pass the hard QC filters.
+# semi_join on chrom+pos gives exactly the overlap between row_map and variants_qc.
+row_map_qc <- semi_join(row_map, variants_qc, by = c("chrom", "pos"))
+
+cat("Post-QC vartrix-matched variants:", nrow(row_map_qc),
+    "of", nrow(variants_qc), "post-QC variants\n")
+
+vt_call_qc_long <- map_dfc(
+  seq_along(cluster_ids),
+  \(i) tibble(!!cluster_ids[i] :=
+    classify_gt_reason(agg_alt[[i]][row_map_qc$vt_row],
+                       agg_ref[[i]][row_map_qc$vt_row]))
+) |>
+  pivot_longer(everything(), names_to = "cluster", values_to = "reason") |>
+  count(cluster, reason) |>
+  group_by(cluster) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup() |>
+  mutate(reason = factor(reason, levels = c("Called", "Low support", "Low purity")))
+
+p_vt_qc_n <- vt_call_qc_long |>
+  ggplot(aes(x = cluster, y = n, fill = reason)) +
+    geom_col(width = 0.7) +
+    geom_text(aes(label = ifelse(pct > 0.02, scales::comma(n), "")),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white") +
+    scale_fill_manual(values = REASON_COLS, name = NULL) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(x = NULL, y = "Variant × cluster calls (n)",
+         title = sprintf(
+           "Vartrix call outcome — post-QC variants (n = %d) — count",
+           nrow(row_map_qc))) +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "top")
+
+p_vt_qc_pct <- vt_call_qc_long |>
+  ggplot(aes(x = cluster, y = pct, fill = reason)) +
+    geom_col(width = 0.7) +
+    geom_text(aes(label = ifelse(pct > 0.02, scales::percent(pct, accuracy = 0.1), "")),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white") +
+    scale_fill_manual(values = REASON_COLS, name = NULL) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "Proportion",
+         title = "Vartrix call outcome — post-QC variants — proportion") +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "top")
+
+p_vt_qc_n
+p_vt_qc_pct
+```
+
+---
+
+## 7. Informative SNPs
+
+Retain only sites polymorphic across strain clusters (≥ 2 distinct non-NA genotype calls).
+
+```{r informative-snps}
+dosage_mat     <- as.matrix(select(variants_qc, all_of(sample_ids)))
+is_informative <- apply(dosage_mat, 1, function(x) length(unique(na.omit(x))) > 1L)
+variants_clean <- variants_qc[is_informative, ]
+
+cat("Informative SNPs retained:", nrow(variants_clean), "\n")
+```
+
+```{r cluster-labels}
+# Count barcode support for every (cluster, label) pair.
+# strn_df was loaded early (load-strn-df chunk) and already filtered cluster_assign.
+label_freq <- fread(clusters_path) |>
+  as_tibble() |>
+  filter(status == "singlet") |>
+  select(barcode, assignment) |>
+  inner_join(
+    select(strn_df, all_of(c(label_bcode_col, label_col))),
+    by = c("barcode" = label_bcode_col)
+  ) |>
+  mutate(label = as.character(.data[[label_col]])) |>
+  count(assignment, label, name = "n") |>
+  arrange(desc(n))
+
+# Greedy 1-to-1 assignment: process pairs in descending support order;
+# accept a pair only when neither its cluster nor its label has been taken.
+singlet_labels <- local({
+  taken_c <- character(); taken_l <- character(); rows <- list()
+  for (i in seq_len(nrow(label_freq))) {
+    r <- label_freq[i, ]
+    if (!r$assignment %in% taken_c && !r$label %in% taken_l) {
+      rows[[length(rows) + 1]] <- r
+      taken_c <- c(taken_c, r$assignment)
+      taken_l <- c(taken_l, r$label)
+    }
+  }
+  matched <- bind_rows(rows) |> arrange(assignment)
+  setNames(matched$label, matched$assignment)
+})
+
+extra_labels   <- c("doublet" = "Doublet", "unassigned" = "Unassigned")
+cluster_labels <- c(singlet_labels,
+                    extra_labels[names(extra_labels) %in% cluster_ids])
+
+rename_cols    <- setNames(names(cluster_labels), cluster_labels)
+variants_qc    <- rename(variants_qc,    !!!rename_cols)
+variants_clean <- rename(variants_clean, !!!rename_cols)
+sample_ids     <- unname(cluster_labels)
+
+cat("Cluster label mapping (k", K, "):\n", sep = "")
+print(data.frame(cluster = names(cluster_labels), label = unname(cluster_labels)),
+      row.names = FALSE)
+```
+
+```{r qc-cluster-plots, fig.width=10, fig.height=4}
+CALL_COLS <- c(REF = "#4caf50", ALT = "#2196f3", "NA" = "#bdbdbd")
+
+# -- Dosage composition per cluster (REF / ALT / NA) -------------------------
+dosage_long <- variants_clean |>
+  select(all_of(sample_ids)) |>
+  pivot_longer(everything(), names_to = "cluster", values_to = "dosage") |>
+  mutate(
+    call    = case_when(is.na(dosage) ~ "NA",
+                        dosage == 0L  ~ "REF",
+                        dosage == 1L  ~ "ALT"),
+    call    = factor(call, levels = c("REF", "ALT", "NA")),
+    cluster = paste0("cluster_", cluster)
+  )
+
+p_dosage <- dosage_long |>
+  count(cluster, call) |>
+  group_by(cluster) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup() |>
+  ggplot(aes(x = cluster, y = pct, fill = call)) +
+    geom_col(width = 0.7) +
+    geom_text(aes(label = ifelse(pct > 0.02, scales::percent(pct, accuracy = 0.1), "")),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white") +
+    scale_fill_manual(values = CALL_COLS, name = "Call") +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "Proportion of informative SNPs",
+         title = "Dosage composition per cluster (informative SNPs)") +
+    theme_classic(base_size = 11)
+
+# -- Per-SNP completeness: number of clusters with a call per site ------------
+n_called_vec <- rowSums(!is.na(as.matrix(select(variants_clean, all_of(sample_ids)))))
+
+p_completeness <- tibble(n_called = n_called_vec) |>
+  count(n_called) |>
+  mutate(n_called = factor(n_called)) |>
+  ggplot(aes(x = n_called, y = n)) +
+    geom_col(fill = "#546e7a", width = 0.6) +
+    geom_text(aes(label = scales::comma(n)), vjust = -0.4, size = 3.2) +
+    scale_y_continuous(labels = scales::comma,
+                       expand = expansion(mult = c(0, 0.15))) +
+    labs(x = "Clusters with a call", y = "Informative SNPs",
+         title = "Per-SNP completeness across clusters") +
+    theme_classic(base_size = 11)
+
+p_dosage
+p_completeness
+```
+
+```{r qc-na-by-stage, fig.width=7, fig.height=4}
+# -- Per-cluster NA rate at two pipeline stages -------------------------------
+na_by_stage <- bind_rows(
+  variants_qc    |>
+    summarise(across(all_of(sample_ids), \(x) mean(is.na(x)))) |>
+    pivot_longer(everything(), names_to = "cluster", values_to = "na_rate") |>
+    mutate(stage = "After QC filters"),
+  variants_clean |>
+    summarise(across(all_of(sample_ids), \(x) mean(is.na(x)))) |>
+    pivot_longer(everything(), names_to = "cluster", values_to = "na_rate") |>
+    mutate(stage = "Informative SNPs")
+) |>
+  mutate(cluster = paste0("cluster_", cluster),
+         stage   = factor(stage, levels = c("After QC filters", "Informative SNPs")))
+
+ggplot(na_by_stage, aes(x = cluster, y = na_rate, fill = stage)) +
+  geom_col(position = "dodge", width = 0.6) +
+  scale_fill_manual(values = c("After QC filters" = "#90a4ae",
+                                "Informative SNPs" = "#37474f"), name = NULL) +
+  scale_y_continuous(labels = scales::percent,
+                     expand = expansion(mult = c(0, 0.1))) +
+  labs(x = NULL, y = "Fraction NA",
+       title = "Per-cluster missing-call rate by pipeline stage") +
+  theme_classic(base_size = 11) +
+  theme(legend.position = "top")
+```
+
+---
+
+## 8. Pairwise Identity by State
+
+For haploid *Plasmodium*, IBS at a biallelic SNP is 1 when two clusters share the same
+allele and 0 when they differ. Haploid dosage (0 = REF, 1 = ALT) is recoded to homozygous
+diploid encoding (0 / 2) before calling `snpgdsIBS()`, which is the standard approach for
+haploid organisms.
+
+```{r ibs-compute}
+library(SNPRelate)
+
+dosage_haploid <- as.matrix(select(variants_clean, all_of(sample_ids)))
+dosage_haploid[dosage_haploid == 1L] <- 2L   # haploid ALT → homozygous encoding
+
+alleles_split <- strsplit(variants_clean$alleles, ",")
+gds_ibs_path  <- sub("\\.gds$", "_snprel.gds", gds_path)
+if (file.exists(gds_ibs_path)) file.remove(gds_ibs_path)
+
+snpgdsCreateGeno(
+  gds.fn         = gds_ibs_path,
+  genmat         = t(dosage_haploid),          # samples × SNPs
+  sample.id      = sample_ids,
+  snp.id         = seq_len(nrow(variants_clean)),
+  snp.chromosome = variants_clean$chrom,
+  snp.position   = variants_clean$pos,
+  snp.allele     = paste(sapply(alleles_split, `[[`, 1),
+                         sapply(alleles_split, function(x) x[2]), sep = "/"),
+  snpfirstdim    = FALSE
+)
+
+gds_ibs <- snpgdsOpen(gds_ibs_path)
+ibs     <- snpgdsIBS(gds_ibs, autosome.only = FALSE, verbose = FALSE)
+snpgdsClose(gds_ibs)
+invisible(file.remove(gds_ibs_path))
+```
+
+```{r ibs-heatmap, fig.width=6, fig.height=5}
+library(pheatmap)
+
+ibs_mat <- ibs$ibs
+rownames(ibs_mat) <- colnames(ibs_mat) <- paste0("cluster_", sample_ids)
+
+pheatmap::pheatmap(
+  ibs_mat,
+  color           = colorRampPalette(c("white", "#2166ac"))(100),
+  breaks          = seq(0, 1, length.out = 101),
+  display_numbers = TRUE,
+  number_format   = "%.3f",
+  fontsize_number = 10,
+  main            = "Pairwise IBS — souporcell clusters (haploid Pf)",
+  cluster_rows    = TRUE,
+  cluster_cols    = TRUE
+)
+```
+
+---
+
+## 9. Chromosome painting
+
+SNPs are binned into windows across the 14 nuclear chromosomes for every pairwise
+cluster comparison. Each window is classified as **Same** (all callable SNPs share
+the same allele), **Different** (all differ), **Both** (mixed), or **No SNP**
+(shown as the white chromosome body).
+
+Two functions drive this section and can be called interactively:
+
+- `make_chrom_windows(variants, sids, wndw, pairs)` — compute window data
+- `chrom_paintr(cw, comps_filter, ncol)` — draw the chromosome painting
+
+```{r chrom-paint-fns}
+# Pf3D7_v3 nuclear chromosome sizes in bp (PlasmoDB)
+pf_chr_size <- tibble(
+  chr  = 1:14,
+  size = c(643292, 947102, 1067971, 1200490, 1343557, 1418242,
+           1445207, 1472805, 1541735, 1687656, 2038340, 2271494,
+           2925236, 3291936)
+)
+
+# Compute per-window pairwise similarity across the genome.
+#   variants : clean variants tibble (output of section 7)
+#   sids     : sample ID vector (sample_ids)
+#   wndw     : window width in bp (default 10 kb)
+#   pairs    : list of 2-element character vectors; NULL = all C(n,2) combinations
+#              e.g. list(c("0","1"), c("0","2"))
+make_chrom_windows <- function(variants, sids, wndw = 10000L, pairs = NULL) {
+  if (is.null(pairs)) pairs <- combn(sids, 2, simplify = FALSE)
+
+  pw_base <- variants |>
+    select(chrom, pos, all_of(sids)) |>
+    mutate(chr = as.integer(str_extract(chrom, "[0-9]+(?=_v3)"))) |>
+    filter(!is.na(chr))   # drop MIT / API chromosomes
+
+  # Per-SNP same (TRUE) / different (FALSE) / uncallable (NA) for each pair
+  pair_sim <- map_dfc(pairs, \(p) {
+    x <- pw_base[[p[1]]]; y <- pw_base[[p[2]]]
+    tibble(!!paste0(p[1], "_vs_", p[2]) :=
+      case_when(!is.na(x) & !is.na(y) & x == y ~ TRUE,
+                !is.na(x) & !is.na(y) & x != y ~ FALSE))
+  })
+
+  bind_cols(select(pw_base, chr, pos), pair_sim) |>
+    mutate(bin_n = ceiling(pos / wndw),
+           start = (bin_n - 1L) * wndw / 1e6,   # bp → Mb
+           end   = bin_n * wndw / 1e6) |>
+    pivot_longer(names(pair_sim), names_to = "comps", values_to = "sim") |>
+    group_by(comps, chr, bin_n, start, end) |>
+    summarise(n_same = sum( sim, na.rm = TRUE),
+              n_diff = sum(!sim, na.rm = TRUE),
+              .groups = "drop") |>
+    mutate(
+      # Continuous IBS ratio: 0 = all SNPs different (black), 1 = all same (yellow).
+      # NA when no callable SNPs in a window (white background shows through).
+      sim_ratio = if_else(n_same + n_diff > 0,
+                          n_same / (n_same + n_diff),
+                          NA_real_),
+      comps = paste0("Cluster ", str_replace(comps, "_vs_", " vs ")),
+      chr   = factor(chr, levels = 1:14)
+    )
+}
+
+# Draw chromosome painting from a make_chrom_windows() result.
+#   cw           : output of make_chrom_windows()
+#   comps_filter : character vector of comparison labels to include; NULL = all
+#                  e.g. c("Cluster 0 vs 1", "Cluster 0 vs 2")
+#   ncol         : number of facet columns
+chrom_paintr <- function(cw, comps_filter = NULL, ncol = 2) {
+  if (!is.null(comps_filter)) cw <- filter(cw, comps %in% comps_filter)
+
+  # Full chromosome background: all 14 chrs × all comparisons in cw.
+  # Built from pf_chr_size so every chromosome is drawn even when it has no
+  # SNPs in the window data (e.g. in a dry run covering only chr 1).
+  chr_bg <- expand_grid(
+    chr   = factor(1:14, levels = 1:14),
+    comps = unique(cw$comps)
+  ) |>
+  left_join(mutate(pf_chr_size, size_mb = size / 1e6,
+                                chr     = factor(chr, levels = 1:14)),
+            by = "chr")
+
+  wndw_kb <- round(median((cw$end - cw$start) * 1e3))
+
+  ggplot() +
+    geom_segment(data = chr_bg,
+                 aes(x = -0.002, xend = size_mb + 0.002, y = chr, yend = chr),
+                 linewidth = 3.2, lineend = "round", colour = "black") +
+    geom_segment(data = chr_bg,
+                 aes(x = 0, xend = size_mb, y = chr, yend = chr),
+                 linewidth = 2.5, lineend = "round", colour = "white") +
+    geom_segment(data = filter(cw, !is.na(sim_ratio)),
+                 aes(x = start, xend = end, y = chr, yend = chr, colour = sim_ratio),
+                 linewidth = 2.5) +
+    # black (0 = all different) → white (0.5) → yellow (1 = all same)
+    scale_colour_gradient2(low = "black", mid = "white", high = "#DACB7D",
+                           midpoint = 0.5, limits = c(0, 1),
+                           name = "IBS ratio\n(same / callable)",
+                           labels = scales::label_percent()) +
+    scale_y_discrete(limits = rev) +
+    facet_wrap(~comps, ncol = ncol) +
+    labs(x     = "Position (Mb)", y = "Chromosome",
+         title = sprintf("Chromosome painting — pairwise IBS in %d kb windows", wndw_kb)) +
+    theme_classic() +
+    theme(strip.text      = element_text(size = 9, face = "bold"),
+          axis.text       = element_text(size = 8),
+          legend.position = "right")
+}
+```
+
+```{r chrom-paint-run, fig.width=12, fig.height=10}
+# All 10 pairwise comparisons with 10 kb windows.
+# Change wndw for coarser/finer resolution, or pass pairs= to subset comparisons:
+#   make_chrom_windows(variants_clean, sample_ids, wndw = 50000L)
+#   make_chrom_windows(variants_clean, sample_ids, pairs = list(c("0","1"), c("0","2")))
+# To subset after computing:
+#   chrom_paintr(chrom_win, comps_filter = c("Cluster 0 vs 1", "Cluster 0 vs 2"))
+
+paint_sids <- if (is.null(chrom_paint_sids)) sample_ids else chrom_paint_sids
+paint_sids <- c("SC1", "SC2", "SC3", "SC4", "SC5")
+chrom_win  <- make_chrom_windows(variants_clean, sids = paint_sids, wndw = chrom_paint_wndw)
+cat("Comparisons:", n_distinct(chrom_win$comps),
+    "| Windows with data:", nrow(chrom_win), "\n")
+
+chrom_paintr(chrom_win, ncol =3)
+```
+
+---
+
+## 10. Summary and save
+
+```{r summary}
+tibble(
+  step  = c("Read", "After QC", "Informative"),
+  n     = c(nrow(variants), nrow(variants_qc), nrow(variants_clean))
+)
+```
+
+```{r preview}
+variants_clean |>
+  select(chrom, pos, alleles, type, AF,
+         all_of(sample_ids[seq_len(min(3, length(sample_ids)))])) |>
+  head(10)
+```
+
+```{r save}
+seqClose(gds)
+
+if (DRY_RUN) {
+  message("DRY RUN complete — output not written")
+} else {
+  dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
+  saveRDS(variants_clean, out_path)
+  cat("Saved:", out_path, "\n")
+}
+```
