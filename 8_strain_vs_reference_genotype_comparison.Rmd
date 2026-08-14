@@ -1,0 +1,374 @@
+---
+title: "MSC49 Strain Clusters vs pxPlaFalc52 — Genotype Comparison"
+date: '`r Sys.Date()`'
+author: 'Jesse Rop'
+output:
+  html_document:
+    toc: true
+    theme: united
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/lustre/scratch126/tol/teams/lawniczak/users/jr35/phd/Talleh")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+## Overview
+
+Compares the genotypes of the five MSC49 souporcell strain clusters (SC1–SC5) against
+a single bulk *P. falciparum* isolate (pxPlaFalc52) independently genotyped by bcftools
+mpileup. The analysis uses:
+
+1. **Pairwise IBS** — Identity by State across all overlapping, allele-concordant SNPs
+2. **Chromosome painting** — windowed IBS ratio across all 14 nuclear chromosomes
+
+The MSC49 cluster genotypes are taken from `clean_variants_k5d_postQClabels.rds`,
+which is the output of `vcf_variant_qc.Rmd` after vartrix refinement and Pf7 QC.
+
+Mismatch distribution and mutation bias analysis continues in `mismatch_bias_analysis.Rmd`.
+
+To knit from the command line:
+```{bash knit-cmd, eval=FALSE}
+module load HGI/softpack/groups/team222/Pf_scRNAseq/34
+Rscript -e "rmarkdown::render('Talleh_code/strain_vs_reference_genotype_comparison.Rmd')"
+```
+
+---
+
+## Libraries
+
+```{r libs}
+.libPaths(c("/opt/view/rlib/R/library", .libPaths()))
+
+suppressPackageStartupMessages({
+  library(SeqArray)
+  library(SNPRelate)
+  library(dplyr)
+  library(stringr)
+  library(purrr)
+  library(tidyr)
+  library(ggplot2)
+  library(tibble)
+})
+```
+
+## Parameters
+
+```{r params}
+source("Talleh_code/project_common_fns.R")
+source("Talleh_code/pf_common_vars.R")
+
+CLEAN_VARIANTS_RDS <- "data/processed/Pf/MSC49/clean_variants_k5_postQClabels.rds"
+REF_VCF            <- "/lustre/scratch126/tol/teams/lawniczak/projects/malaria_single_cell/mali_field_runs/2022/genomes/grit/vcfs/lrHMW_um_fasta_onto_Pf3D7_bcftools/pxPlaFalc52_filtered.vcf.gz"
+OUT_DIR            <- "data/processed/Pf/MSC49/ref_comparison"
+REF_ID             <- "pxPlaFalc52"
+WINDOW_SIZE        <- 100000L    # bp window for chromosome painting
+MT_CHROM           <- "Pf3D7_MIT_v3"
+API_CHROM          <- "Pf3D7_API_v3"
+GFF_FILE           <- "/lustre/scratch126/tol/teams/lawniczak/users/jr35/Pf3D7_genomes_gtfs_indexs/PlasmoDB-68_Pfalciparum3D7.gff"
+
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+```
+
+---
+
+## 1. Load Clean Cluster Variants
+
+```{r load-clusters}
+variants_clean <- readRDS(CLEAN_VARIANTS_RDS)
+
+# Identify dosage columns: exclude known metadata and read-count columns
+meta_cols    <- c("chrom", "pos", "alleles", "type", "quality", "depth",
+                  "vcf_filter", "pf7_filter", "VQSLOD", "CDS",
+                  "AC", "AN", "AF", "in_pf7")
+readcnt_cols <- grep("_RefN$|_AltN$", names(variants_clean), value = TRUE)
+non_singlet  <- intersect(names(variants_clean), c("Doublet", "Unassigned", "ref", "alt"))
+cluster_ids  <- setdiff(names(variants_clean),
+                        c(meta_cols, readcnt_cols, non_singlet))
+
+cat("Cluster columns detected:", paste(cluster_ids, collapse = ", "), "\n")
+cat("Informative SNPs in clean variants:", nrow(variants_clean), "\n")
+```
+
+---
+
+## 2. Read Reference VCF (pxPlaFalc52)
+
+Convert the bcftools-called VCF to GDS format and extract haploid genotype dosage
+(0 = REF, 1 = ALT, NA = missing). Only nuclear chromosomes are retained.
+
+```{r read-ref-vcf}
+ref_gds_path <- file.path(OUT_DIR, "pxPlaFalc52_ref.gds")
+
+if (exists("ref_gds")) tryCatch(seqClose(ref_gds), error = function(e) NULL)
+seqVCF2GDS(REF_VCF, ref_gds_path, storage.option = "ZIP_RA")
+ref_gds <- seqOpen(ref_gds_path)
+
+# Restrict to nuclear chromosomes present in the cluster variants
+nuclear_chroms <- setdiff(unique(variants_clean$chrom), c(MT_CHROM, API_CHROM))
+seqSetFilter(ref_gds,
+             variant.sel = seqGetData(ref_gds, "chromosome") %in% nuclear_chroms)
+
+cat("Reference VCF variants (nuclear):", length(seqGetData(ref_gds, "variant.id")), "\n")
+
+# Extract variant coordinates and alleles
+ref_chrom   <- seqGetData(ref_gds, "chromosome")
+ref_pos     <- seqGetData(ref_gds, "position")
+ref_alleles <- seqGetData(ref_gds, "allele")   # "REF,ALT[,ALT2]" format
+
+# SeqArray $dosage returns 0 = REF, 1 = ALT (standard VCF convention).
+# The MSC49 cluster data uses the OPPOSITE encoding (0 = ALT, 1 = REF) because
+# vartrix alt.mtx and ref.mtx output files are swapped: alt.mtx contains
+# REF-supporting reads and ref.mtx contains ALT-supporting reads. The haploid
+# caller in vcf_variant_qc.Rmd therefore assigns 1 to the REF allele and 0 to
+# the ALT allele, despite the comment saying the reverse.
+# Invert the reference dosage (1 - dosage) so both datasets share the same
+# encoding before comparison.
+ref_dosage <- seqGetData(ref_gds, "$dosage")   # shape: (1, n_variants)
+
+seqClose(ref_gds)
+
+ref_variants <- tibble(
+  chrom   = ref_chrom,
+  pos     = ref_pos,
+  ref_vcf = str_extract(ref_alleles, "^[^,]+"),
+  alt_vcf = str_extract(ref_alleles, "(?<=,)[^,]+")   # first ALT only
+) |>
+  mutate(!!REF_ID := 1L - as.integer(ref_dosage[1, ]))
+
+cat("Parsed reference variants:", nrow(ref_variants), "\n")
+```
+
+---
+
+## 3. Find Overlapping Variants
+
+Join on chromosome + position. Both VCFs were called against the same Pf3D7
+reference genome so the REF allele must be identical at any shared position.
+Sites where the ALT allele differs (different variant called at the same position,
+e.g. one VCF called a SNP and the other an INDEL) are dropped.
+
+```{r find-overlap}
+cluster_variants <- variants_clean |>
+  mutate(
+    ref_sc = str_extract(alleles, "^[^,]+"),
+    alt_sc = str_extract(alleles, "(?<=,)[^,]+")
+  )
+
+joined <- inner_join(
+  cluster_variants,
+  ref_variants,
+  by = c("chrom", "pos")
+)
+
+overlap <- joined |>
+  filter(ref_sc == ref_vcf, alt_sc == alt_vcf)
+
+cat("Inner join (chrom + pos):", nrow(joined), "sites\n")
+cat("Allele-concordant overlap:", nrow(overlap), "sites\n")
+cat("Dropped (different ALT allele):", nrow(joined) - nrow(overlap), "sites\n")
+```
+
+---
+
+## 4. Combined Dosage Matrix
+
+```{r combined-matrix}
+all_ids <- c(cluster_ids, REF_ID)
+
+overlapping_variants <- overlap |>
+  select(chrom, pos, alleles, CDS, ref_sc, alt_sc, all_of(all_ids))
+
+dosage_mat <- as.matrix(select(overlapping_variants, all_of(all_ids)))
+
+cat("Combined dosage matrix:", paste(dim(dosage_mat), collapse = " variants × "), "samples\n")
+cat("\nMissing-call rates per sample:\n")
+round(colMeans(is.na(dosage_mat)), 3) |> print()
+```
+
+---
+
+## 5. Pairwise IBS
+
+Both datasets now use the vartrix convention: 0 = ALT allele, 1 = REF allele.
+The value 1 is recoded to 2 for `snpgdsIBS()` (homozygous diploid representation),
+matching the pattern in `vcf_variant_qc.Rmd`.
+
+```{r ibs-compute}
+dosage_diploid <- dosage_mat
+storage.mode(dosage_diploid) <- "double"
+dosage_diploid[dosage_diploid == 1] <- 2     # haploid ALT → homozygous encoding
+
+alleles_split <- strsplit(overlapping_variants$alleles, ",")
+gds_ibs_path  <- file.path(OUT_DIR, "ibs_tmp.gds")
+if (file.exists(gds_ibs_path)) file.remove(gds_ibs_path)
+
+snpgdsCreateGeno(
+  gds.fn         = gds_ibs_path,
+  genmat         = t(dosage_diploid),              # samples × SNPs
+  sample.id      = all_ids,
+  snp.id         = seq_len(nrow(overlapping_variants)),
+  snp.chromosome = overlapping_variants$chrom,
+  snp.position   = overlapping_variants$pos,
+  snp.allele     = paste(sapply(alleles_split, `[[`, 1),
+                         sapply(alleles_split, function(x) x[2]), sep = "/"),
+  snpfirstdim    = FALSE
+)
+
+gds_ibs <- snpgdsOpen(gds_ibs_path)
+ibs     <- snpgdsIBS(gds_ibs, autosome.only = FALSE, verbose = FALSE)
+snpgdsClose(gds_ibs)
+invisible(file.remove(gds_ibs_path))
+
+saveRDS(ibs, file.path(OUT_DIR, "ibs_vs_pxPlaFalc52.rds"))
+```
+
+```{r ibs-summary}
+ibs_mat <- ibs$ibs
+rownames(ibs_mat) <- colnames(ibs_mat) <- all_ids
+
+ibs_df <- tibble(
+  Cluster   = cluster_ids,
+  IBS_score = ibs_mat[cluster_ids, REF_ID]
+) |>
+  arrange(desc(IBS_score))
+
+cat("Pairwise IBS — MSC49 clusters vs", REF_ID, "\n")
+knitr::kable(ibs_df, digits = 4,
+             col.names = c("Cluster", "IBS score"),
+             caption   = sprintf("Pairwise IBS: MSC49 strain clusters vs %s", REF_ID))
+```
+
+```{r ibs-barplot, fig.width = 5, fig.height = 4}
+ggplot(ibs_df, aes(x = reorder(Cluster, -IBS_score), y = IBS_score, fill = IBS_score)) +
+  geom_col(width = 0.6, colour = "grey30") +
+  geom_text(aes(label = sprintf("%.3f", IBS_score)),
+            vjust = -0.4, size = 3.5) +
+  scale_fill_gradient(low = "white", high = "#2166ac",
+                      limits = c(0, 1), guide = "none") +
+  scale_y_continuous(limits = c(0, 1),
+                     expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    x     = "MSC49 strain cluster",
+    y     = "Pairwise IBS",
+    title = sprintf("Genotype similarity — MSC49 clusters vs %s", REF_ID)
+  ) +
+  theme_classic(base_size = 12)
+
+ggsave(file.path(OUT_DIR, "cluster_ref_ibs_barplot.pdf"), width = 5, height = 4)
+```
+
+---
+
+## 6. Chromosome Painting
+
+Each cluster is painted against pxPlaFalc52 using `make_chrom_windows()` and
+`chrom_paintr()` from `project_common_fns.R`. Windows coloured yellow indicate
+high allele sharing (IBS ≈ 1); black indicates all SNPs differ; white indicates
+no callable SNPs in that window.
+
+```{r chrom-paint, fig.width = 10, fig.height = 4.5}
+# pairs_vs_ref <- map(cluster_ids, ~c(.x, REF_ID))
+pairs_vs_ref <- map(cluster_ids, ~c(.x, "HMW DNA"))
+all_ids_hmw <- all_ids
+all_ids_hmw[6] <- "HMW DNA"
+
+cw <- make_chrom_windows(
+  variants = overlapping_variants %>% rename("HMW DNA" = pxPlaFalc52),
+  sids     = all_ids_hmw,
+  wndw     = WINDOW_SIZE,
+  pairs    = pairs_vs_ref
+)
+
+p_paint <- chrom_paintr(cw, ncol = 3)
+print(p_paint)
+
+ggsave(file.path(OUT_DIR, "cluster_ref_chrom_painting.pdf"),
+       plot = p_paint, width = 10, height = 8)
+```
+
+---
+
+## 7. Summary
+
+```{r summary}
+best_match <- ibs_df |> slice_max(IBS_score, n = 1)
+
+cat(sprintf(
+  "Best match to %s: %s (IBS = %.4f)\n",
+  REF_ID, best_match$Cluster, best_match$IBS_score
+))
+cat(sprintf("SNPs used for comparison: %d\n", nrow(overlapping_variants)))
+cat(sprintf("Chromosome painting window size: %d kb\n", WINDOW_SIZE / 1000L))
+cat(sprintf("Outputs written to: %s/\n", OUT_DIR))
+```
+
+---
+
+## 8. Mismatch Distribution — Best Cluster vs Reference
+
+Identifies sites where **`r best_match$Cluster`** disagrees with **`r REF_ID`** and tests
+whether those mismatches are randomly distributed across chromosomes, genome windows,
+CDS / intergenic regions, and (optionally) annotated gene families.
+
+### 8a. Identify mismatches
+
+```{r mismatch-identify}
+best_cluster <- best_match$Cluster
+
+mismatch_df <- overlapping_variants |>
+  mutate(
+    cluster_gt  = .data[[best_cluster]],
+    ref_gt      = .data[[REF_ID]],
+    is_callable = !is.na(cluster_gt) & !is.na(ref_gt),
+    is_mismatch = is_callable & (cluster_gt != ref_gt)
+  )
+
+cat(sprintf("Callable sites (both genotyped): %d\n",   sum(mismatch_df$is_callable)))
+cat(sprintf("Mismatch sites:                  %d (%.2f%% of callable)\n",
+            sum(mismatch_df$is_mismatch),
+            100 * sum(mismatch_df$is_mismatch) / sum(mismatch_df$is_callable)))
+```
+
+### 8b. Per-chromosome mismatch rates
+
+```{r mismatch-per-chrom}
+chrom_stats <- mismatch_df |>
+  filter(is_callable) |>
+  group_by(chrom) |>
+  summarise(
+    n_callable    = n(),
+    n_mismatch    = sum(is_mismatch),
+    mismatch_rate = n_mismatch / n_callable,
+    .groups = "drop"
+  ) |>
+  arrange(chrom)
+
+knitr::kable(chrom_stats, digits = 4,
+             caption = sprintf("Per-chromosome mismatch rates: %s vs %s",
+                               best_cluster, REF_ID))
+```
+
+```{r save-mismatch-inputs}
+# Save objects needed by mismatch_bias_analysis.Rmd
+saveRDS(mismatch_df,  file.path(OUT_DIR, "mismatch_df.rds"))
+saveRDS(chrom_stats,  file.path(OUT_DIR, "chrom_stats.rds"))
+saveRDS(
+  list(best_cluster = best_cluster,
+       REF_ID       = REF_ID,
+       OUT_DIR      = OUT_DIR,
+       WINDOW_SIZE  = WINDOW_SIZE,
+       GFF_FILE     = GFF_FILE),
+  file.path(OUT_DIR, "mismatch_params.rds")
+)
+cat("Inputs for mismatch_bias_analysis.Rmd saved to", OUT_DIR, "\n")
+```
+
+---
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```
