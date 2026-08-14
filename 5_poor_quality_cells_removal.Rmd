@@ -31,6 +31,7 @@ suppressPackageStartupMessages({
   library(SingleCellExperiment)
   library(parallel)
   library(ggforce)
+  library(findPC)
   
   conflict_prefer("select", "dplyr")
   conflict_prefer("filter", "dplyr")
@@ -250,11 +251,14 @@ std_theme <- theme(axis.text=element_text(size=18),
 ```{r, results='asis'}
 ## Plot UMI count vs percent.mt with per-sample mt cutoff line
 pmap(list(all_seu_prelim_stg_norm, mt_filt, names(all_seu_prelim_stg_norm)), ~{
-  FeatureScatter(..1, feature1 = "pf_umi_count", feature2 = "percent.mt", group.by = "stage_fld", pt.size = 0.1)+ 
+  FeatureScatter(..1, feature1 = "pf_umi_count", feature2 = "percent.mt", group.by = "stage_fld", pt.size = 0.5)+ 
     scale_color_manual(values = sp_col_new) +
     geom_hline(yintercept = ..2)  +
     labs(title = ..3) +
-    std_theme
+    std_theme+
+    theme(axis.text.x=element_text(angle=20, hjust = 1))+
+    labs(x = "UMI count") +
+  guides(color = guide_legend(title = 'Stage', override.aes = list(size = 4)))
   
 })
 

@@ -29,6 +29,7 @@ suppressPackageStartupMessages({
   library(conflicted)
   library(SingleCellExperiment)
   library(scDblFinder)
+  library(findPC)
 
 
   # NOTE: packages commented below are possibly unused in this Rmd.
@@ -161,8 +162,8 @@ for (i in 1:length(all_seu_filtOlMtCb_slct)) {
 #### Incorporate and visualize strain - souporcell (SC)
 We did souporcell assuming a range of 3 strains (6,7 and 8)
 ```{r, eval=T}
-# algn_nm <- "hsat"
-algn_nm <- "minmap"
+algn_nm <- "hsat"
+# algn_nm <- "minmap"
 
 species <- "Pf"
 sv_dir <- "pbulk_gtypes_preQC_resc_hspf"
@@ -187,9 +188,15 @@ soupo_kselect_list_pp <- soupo_kselect_list_pp %>%
 ```{r}
 ## NOTE !! - We already think that donor M49 has five strains and M68 has 3 strains so we use that
 optimum_k <- c(5, 3)
-soupo_kselect_list_pp <- pmap(list(soupo_kselect_list_pp, names(soupo_kselect_list_pp), optimum_k), ~..1 %>% mutate(Strain = !!rlang::sym(paste0("Strain_hmo_", str_remove(str_extract(..2, "M.*[0-9]+"), "SC"), "_minmap_", ..3))))
+soupo_kselect_list_pp <- pmap(list(soupo_kselect_list_pp, names(soupo_kselect_list_pp), optimum_k), ~..1 %>% mutate(Strain = !!rlang::sym(paste0("Strain_hmo_", str_remove(str_extract(..2, "M.*[0-9]+"), "SC"), "_", algn_nm,"_", ..3))))
 
 map(soupo_kselect_list_pp, ~.x %>% count(Strain, Strain_DN))
+```
+
+
+```{r, message=FALSE, warning=FALSE, eval=T}
+## Save for comparison with m49 old
+saveRDS(soupo_kselect_list_pp, "data/processed/Pf/m2_all/soupo_kselect_list_pp.RDS")
 ```
 
 
@@ -294,7 +301,7 @@ all_seu_filtOlMtCb_w_dblt <- list(scf_outputs, all_seu_filtOlMtCb_slct) %>%
 
 
 ```{r}
-rm(all_seu_filtOlMtCb_slct)
+# rm(all_seu_filtOlMtCb_slct)
 ```
 
 ```{r, message=FALSE}
@@ -657,7 +664,7 @@ saveRDS(doublets_bcodes_rm, "data/processed/Pf/m2_all/lowQC_rm_plotting/doublets
 ```
 
 ```{r}
-rm(all_filt_cb_no_StgDblts)
+# rm(all_filt_cb_no_StgDblts)
 ```
 ################ END strain removal readded ################ 
 
@@ -703,13 +710,15 @@ plot_grid(plotlist = plts_sc_dbts, ncol = 4)
 
 ```{r}
 
-filt_flow_dbt <- list(scf_dblts_rm) %>% set_names("scdblfinder") %>% bind_rows(., .id = "filt_metric") %>% mutate(across(filt_metric, ~factor(., levels = c("scdblfinder"))))
+filt_flow_dbt <- list(scf_dblts_rm, str_dbt_rm) %>% set_names("scdblfinder", "strain") %>% bind_rows(., .id = "filt_metric") %>% mutate(across(filt_metric, ~factor(., levels = c("scdblfinder", "strain"))))
 
 ```
 
-```{r eval=FALSE}
+```{r, eval=F}
 ## Number of cell population removed by respective filter
-filt_diff <- (filt_flow_dbt[-nrow(filt_flow_dbt), ] - filt_flow_dbt[-1, ]) 
+# filt_diff <- (filt_flow_dbt[-nrow(filt_flow_dbt), ] - filt_flow_dbt[-1, ]) 
+filt_diff <- filt_flow_dbt
+
 
 filt_diff$filt_metric <- paste0(filt_flow_dbt[-1, ]$filt_metric, "_rm")
 filt_diff_t <- filt_diff  %>% column_to_rownames("filt_metric") %>% t() %>% as.data.frame() 
@@ -736,7 +745,7 @@ filt_flow_dbt_diff_t
 ```
 
 
-```{r, eval=FALSE}
+```{r, eval=F}
 saveRDS(filt_flow_dbt_diff_t, "data/processed/Pf/m2_all/filt_flow_dbt_diff_t.RDS") 
 
 ```

@@ -115,7 +115,7 @@ all_seu_prelim_stg[["MSC49"]]@meta.data %>% rownames_to_column("bcode") %>% righ
 ## Compare the original sct object that was shared with talleh to the new seurat object that was created with the same counts and meta.data but with the new stage annotations to check that the stage annotations are the same between the two objects
 
 ```{r, eval=T}
-# Read annotated Seurat objects (prelim stage) for the selected samples
+# Read annotated Seurat objects (prelim stage) for the selected samples - from
 all_seu_prelim_stg_norm_for_pct.mito_comp <- list.files("data/processed/Pf", pattern = "seu_prelim_stg_norm_for_comp_b4_pct_mito_filt.RDS$", full.names = T, recursive = T, include.dirs = T) %>% 
   set_names(nm = (str_remove_all(.,'data/processed/Pf/|/seu_obj/|seu_prelim_stg_norm_for_comp_b4_pct_mito_filt.*.RDS'))) %>% 
   .[sample_name] %>%
@@ -219,7 +219,7 @@ all_seu_ta_mt_filt_missing_subset_afterOutlierRm
 COMPARE FINAL AFTER REMOVAL OF ALL POOR QC
 
 ```{r, message=FALSE, warning=FALSE, eval=T}
-# Save the poorQC cells barcodes for plotting
+# Save the poorQC cells barcodes for plotting - from '~/Talleh_code/m21_raw_QC_prelim_cbendr_dblts_ta19.Rmd'
 all_seu_filtOlMtCb_umap_mdata <- readRDS("data/processed/Pf/m2_all/lowQC_rm_plotting/all_seu_filtOlMtCb_umap_mdata.RDS")
 
 ```
@@ -244,11 +244,25 @@ all_seu_ta_missing_subset
 COMPARE STRAIN K=3 CONSENSUS ANNOTAION IN THE NEW OBJECT VERSUS OLD
 
 ```{r, message=FALSE, warning=FALSE, eval=T}
+## read - from '~/Talleh_code/m21_raw_QC_prelim_cbendr_dblts_ta19.Rmd'
 all_seu_filtOlMtCb_slct_w_strain_mdata <- readRDS("data/processed/Pf/m2_all/all_seu_filtOlMtCb_slct_w_strain_mdata.RDS")
 ```
 
 ```{r, eval=T}
 all_seu_filtOlMtCb_slct_w_strain_mdata[["MSC49"]] %>% rownames_to_column("bcode") %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(strain_gt_nw, strain_gt_old)
+```
+
+```{r, message=FALSE, warning=FALSE, eval=T}
+## read strain assignment from '~/Talleh_code/m21_raw_QC_prelim_cbendr_dblts_ta19.Rmd'
+soupo_kselect_list_pp <- readRDS("data/processed/Pf/m2_all/soupo_kselect_list_pp.RDS")
+```
+
+```{r, eval=T}
+soupo_kselect_list_pp[["MSC49_hsat"]] %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(strain_gt_nw, strain_gt_old)
+```
+
+```{r, eval=T}
+soupo_kselect_list_pp[["MSC49_hsat"]] %>% right_join(msc49_ta19@meta.data %>% rownames_to_column("bcode"), by = "bcode", suffix = c("_nw", "_old")) %>% count(Strain_DN_nw, Strain_DN_old)
 ```
 
 ```{r, eval=T}
@@ -258,6 +272,7 @@ all_seu_filtOlMtCb_slct_w_strain_mdata[["MSC49"]] %>% rownames_to_column("bcode"
 COMPARE AFTER STAGE DOUBLET REMOVAL
 
 ```{r, message=FALSE, warning=FALSE, eval=T}
+## - from '~/Talleh_code/m21_raw_QC_prelim_cbendr_dblts_ta19.Rmd'
 all_filt_cb_no_ScfStgDblts_mdata <- readRDS("data/processed/Pf/m2_all/all_filt_cb_no_ScfStgDblts_mdata.RDS")
 
 ```
@@ -271,7 +286,7 @@ all_filt_cb_no_ScfStgDblts_mdata <- readRDS("data/processed/Pf/m2_all/all_filt_c
 COMPARE AFTER STRAIN NEGATIVE REMOVAL
 
 ```{r, message=FALSE, warning=FALSE, eval=T}
-## Save for comparison with m49 old
+## read - from '~/Talleh_code/m21_raw_QC_prelim_cbendr_dblts_ta19.Rmd'
 all_cb_filt_dbt_neg_mdata <- readRDS("data/processed/Pf/m2_all/all_cb_filt_dbt_neg_mdata.RDS")
 ```
 

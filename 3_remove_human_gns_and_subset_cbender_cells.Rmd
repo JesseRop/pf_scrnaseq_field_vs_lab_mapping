@@ -47,7 +47,7 @@ knitr::opts_knit$set(root.dir = '/lustre/scratch126/tol/teams/lawniczak/users/jr
 #### Source common functions, variables and tables
 ```{r}
 ##Boxplot labeling function
-source("~/Talleh_code/project_plotting_fns.R")
+source("~/Talleh_code/project_common_fns.R")
 
 # Helper inputs:
 # - file_paths: character vector of files to name and keep in sample order.
@@ -94,6 +94,8 @@ load_named_tables <- function(file_paths, strip_pattern, reader) {
 ```{r}
 # Select sample names
 sample_name <- c("MSC49", "MSC68")
+key_samples <- sample_name
+don_order <- sample_name
 
 ```
 
@@ -342,9 +344,66 @@ call_methods_overlap_barplot_fn(cr_cbender_mdata_slct_uni, "mthds_union", pf_umi
 ```
 
 
+```{r, message=F, warning=F, eval=T, fig.width=12, fig.height=5}
+plot_tbl_2 <- cr_cbender_mdata_slct_uni[key_samples] %>%
+    bind_rows(., .id = "donor") %>%
+    mutate(across(donor, ~factor(str_remove_all(., "SC|C$"), levels = str_remove(don_order, "SC|C$")))) 
+
+
+labls <- unique(plot_tbl_2$mthds_union) %>% str_replace_all(., c("mPf" = "Pf", "mHs" = "HsPf")) %>% set_names(unique(plot_tbl_2$mthds_union))
+
+map2(c("gn", "umi"), c("Gene", "UMI"), ~{
+    call_methods_overlap_scatter_fn( tbl = plot_tbl_2,   gn_or_umi = .x,  mthd = "mthds_union",  ncols = 2  ) +
+    scale_color_manual(values = c_combos_cols, labels = labls) +
+    labs(x = paste0("Pf ", .y, " count (log10)"), y = paste0("Hs ", .y, " count (log10)")) +
+    theme(axis.title = element_text(size = 20, face = "bold")) +
+    guides(color = guide_legend(title = 'Cell call methods', override.aes = list(size = 4), nrow = 1))
+  })
+
+```
+
+
+```{r, message=F, warning=F, eval=T, fig.width=4, fig.height=4}
+call_methods_overlap_scatter_fn( tbl = cr_cbender_mdata_slct_uni[["MSC49"]] %>% mutate(donor = "MSC49"),   gn_or_umi = "umi",  mthd = "mthds_union",  ncols = 1  ) +
+    scale_color_manual(values = c_combos_cols, labels = labls) +
+    labs(x = paste0("Pf UMI count (log10)"), y = paste0("Hs UMI count (log10)")) +
+    theme(axis.title = element_text(size = 16, face = "bold"),
+          text = element_text(size = 16),
+          strip.text.x.top = element_blank()) +
+    guides(color = guide_legend(title = 'Cell call methods', override.aes = list(size = 4), nrow = 1, title.position = "top"))
+
+```
+
+```{r, fig.width=3, fig.height=4}
+call_methods_overlap_barplot_fn(cr_cbender_mdata_slct_uni["MSC49"], "mthds_union", pf_umi_filt = 100, min_grp_size = 0) + 
+  theme(legend.position = "none") +
+  labs(x = "Cell call methods", y = "Cell counts (X 1000) \t\t") +
+    theme(axis.title = element_text(size = 16, face = "bold"),
+          text = element_text(size = 16),
+          strip.text.x.top = element_blank()) 
+```
+```{r, message=F, warning=F, eval=T, fig.height=14, fig.width=12}
+cr_cbender_uni_pf100_mrg <- bind_rows(map(cr_cbender_mdata_slct_uni, ~filter(., pf_umi_count > 100)), .id = "donor")
+```
+
+```{r, message=F, warning=F, eval=T, fig.width=12, fig.height=5.5}
+map2(c("gn", "umi"), c("Gene", "UMI"), ~call_methods_overlap_scatter_fn(
+  tbl = cr_cbender_uni_pf100_mrg %>%  
+    filter(donor %in% key_samples) %>%
+    mutate(across(donor, ~factor(str_remove(., "C$"), levels = don_order))), 
+  gn_or_umi = .x,
+  mthd = "mthds_union",
+  ncols = 6
+  )  +
+    labs(x = paste0("Pf ", .y, " count (log10)"), y = paste0("Hs ", .y, " count (log10)")) +
+    guides(color = guide_legend(title = 'Cell call methods', override.aes = list(size = 4), nrow = 1))
+  )
+
+```
+
+
 ```{r}
 ## Create the final cell call category to go forward with
-
 cr_cbender_mdata_slct_uni_pf100 <- map2(cr_cbender_mdata_slct_uni, cranger_bcodes[names(cr_cbender_mdata_slct_uni)], ~.x %>%
                                           mutate(fnl_call = case_when(mthds_union %in%  c("Cr_Cb", "Cb") ~ "Cell",
                                                                       mthds_union == "Cr" ~ "other_calls",

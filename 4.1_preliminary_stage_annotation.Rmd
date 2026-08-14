@@ -470,43 +470,11 @@ singleR_scmap_df_snky <- map2(all_pref_pred_df_fnl_cbender, multi_ref_stg_tbl2_s
 ```
 
 
-```{r, fig.width=4, fig.height=4}
-# Define sankey plot helper used to compare label assignments between methods
-snk_pt_fn <- function(decod_tbl, strns_2_plt = c('Strain_2nd', 'n_strains'), labls = paste0("K=", opt_clusters_nms[[3]][1:2]), bp_face = c("bold", "plain"), ttl = "plot", strain_colours = strain_cols_n) {
-  decod_tbl %>% 
-    mutate(across(contains("train"), ~str_replace_all(., c("Doublet" = "Dbt", "Negative" = "Neg")))) %>%
-    make_long(all_of(strns_2_plt)) %>% 
-    add_count(x,node, "n") %>%
-    ggplot(., aes(x = x, next_x = next_x,node = node,next_node = next_node,fill = factor(node),label = paste0(node,": ",n))) +
-    geom_sankey() +
-    theme_void()+
-    scale_fill_manual(values = strain_colours) +
-    scale_x_discrete(labels=labls)+
-    geom_sankey_label(size = 3.6, color = 1, fill = "white") +
-    labs(title = ttl) +
-    theme_sankey(base_size = 9) +
-    theme(legend.position = "none",
-          axis.title.x = element_blank(),
-          axis.text.x = element_text(size = 15, face = bp_face))
-  
-}
-
-
-```
-
 ```{r, message=FALSE, warning=FALSE}
 # Generate sankey plots comparing SingleR fine stage to scmap field stage
-imap(singleR_scmap_df_snky, ~snk_pt_fn(., strns_2_plt = c("sR_fine_stg", "stage_fld"), labls = c("SingleR", "scmap"), bp_face = c("bold", "bold"), ttl = .y, strain_colours = sp_col_new_abrv))
+imap(singleR_scmap_df_snky, ~snk_pt_fn_stg(., strns_2_plt = c("sR_fine_stg", "stage_fld"), labls = c("SingleR", "scmap"), bp_face = c("bold", "bold"), ttl = .y, strain_colours = sp_col_new_abrv))
 
 ```
-
-
-```{r, message=FALSE, warning=FALSE}
-# Generate sankey plots comparing SingleR coarse stage to scmap coarse stage
-imap(singleR_scmap_df_snky, ~snk_pt_fn(., strns_2_plt = c("sR_stage_afm", "stage_afm"), labls = c("SingleR", "scmap"), bp_face = c("bold", "bold"), ttl = .y, strain_colours = sp_col_new_abrv))
-
-```
-
 
 ```{r}
 # Summarize agreement between SingleR and scmap as percentage table for heatmap plotting
