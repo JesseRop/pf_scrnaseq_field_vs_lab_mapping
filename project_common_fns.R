@@ -218,7 +218,7 @@ umi_box_vln_plt_fn <- function(ncount_tbl, cell_call_methd, numbr_of_cols = 4, b
 }
 
 
-snk_pt_fn <- function(decod_tbl, strns_2_plt = c('Strain_2nd', 'n_strains'), labls = paste0("K=", opt_clusters_nms[[3]][1:2]), bp_face = c("bold", "plain"), ttl = "plot", strain_colours = strain_cols_n, labl_size = 3.6, bs_size = 9, strns_2_plt_lvls = sort(names(strain_cols_n)), labl_sep = ": ", rm_from_lab = "nothing") {
+snk_pt_fn <- function(decod_tbl, strns_2_plt = c('Strain_2nd', 'n_strains'), labls = paste0("K=", opt_clusters_nms[[3]][1:2]), bp_face = c("bold", "plain"), ttl = "plot", strain_colours = strain_cols_n, labl_size = 3.6, bs_size = 9, strns_2_plt_lvls = sort(names(strain_cols_n)), labl_sep = ": ", rm_from_lab = "nothing", remove_misssing_vals = F) {
   decod_tbl %>% 
     mutate(across(contains("train"), ~str_replace_all(., c("Doublet" = "Dbt", "Negative" = "Neg")))) %>%
     make_long(all_of(strns_2_plt)) %>%
@@ -228,7 +228,7 @@ snk_pt_fn <- function(decod_tbl, strns_2_plt = c('Strain_2nd', 'n_strains'), lab
     add_count(x,node, "n") %>%
     ggplot(., aes(x = x, next_x = next_x,node = node,next_node = next_node,fill = node,label = paste0(str_remove(node, rm_from_lab), labl_sep,n))) +
     # ggplot(., aes(x = x, next_x = next_x,node = node,next_node = next_node,fill = factor(node),label = paste0(node, labl_sep,n))) +
-    geom_sankey() +
+    geom_sankey(na.rm = remove_misssing_vals) +
     theme_void()+
     scale_fill_manual(values = strain_colours) +
     scale_x_discrete(labels=labls)+
@@ -459,18 +459,145 @@ call_methods_overlap_barplot_fn <- function(tbl = cr_cbender_mdata_slct_uni, mth
 
 
 ## Function to plot the scatter of the human versus plasmodium umi or gene count coloured by different cell calling method
-call_methods_overlap_scatter_fn <- function(tbl = cr_cbender_uni_pf100_mrg, gn_or_umi = "umi",  mthd = "mthds_union") {
+call_methods_overlap_scatter_fn <- function(tbl = tbl, gn_or_umi = "umi",  mthd = "mthds_union", ncols = 5) {
   
   ggplot(tbl, aes(x = log10(!!rlang::sym(paste0('pf_',gn_or_umi,'_count'))), y = log10(!!rlang::sym(paste0('hs_',gn_or_umi,'_count'))), colour = !!rlang::sym(mthd))) +
     geom_point(size = 0.01) +
     # geom_density_2d()  +
     scale_colour_manual(values = c_combos_cols) +
-    facet_wrap(donor ~ .,  ncol = 5) +
+    facet_wrap(donor ~ .,  ncol = ncols) +
     geom_hline(yintercept = log10(100)) +
     geom_vline(xintercept = log10(100)) +
+    theme_classic() +
+    theme(text = element_text(size = 11),
+          legend.position = "bottom",
+          axis.text.y = element_text(size = 16),
+          axis.text.x = element_text(size = 16, hjust = 1),
+          strip.text.x.top = element_text(size = 17, face= "bold"),
+          axis.title = element_text(size = 17),
+          legend.text = element_text(size = 16),
+          legend.title = element_text(size = 17, face = "bold")) +
     guides(color = guide_legend(title = 'Cell call', override.aes = list(size = 4), ncol = 1))
 }
 
 
+# Define sankey plot helper used to compare label assignments between methods
+snk_pt_fn_stg <- function(decod_tbl, strns_2_plt = c('Strain_2nd', 'n_strains'), labls = paste0("K=", opt_clusters_nms[[3]][1:2]), bp_face = c("bold", "plain"), ttl = "plot", strain_colours = strain_cols_n, remove_misssing_vals = F) {
+  decod_tbl %>% 
+    mutate(across(contains("train"), ~str_replace_all(., c("Doublet" = "Dbt", "Negative" = "Neg")))) %>%
+    make_long(all_of(strns_2_plt)) %>% 
+    add_count(x,node, "n") %>%
+    ggplot(., aes(x = x, next_x = next_x,node = node,next_node = next_node,fill = factor(node),label = paste0(node,": ",n))) +
+    geom_sankey(na.rm = remove_misssing_vals) +
+    theme_void()+
+    scale_fill_manual(values = strain_colours) +
+    scale_x_discrete(labels=labls)+
+    geom_sankey_label(size = 3.6, color = 1, fill = "white") +
+    labs(title = ttl) +
+    theme_sankey(base_size = 9) +
+    theme(legend.position = "none",
+          axis.title.x = element_blank(),
+          axis.text.x = element_text(size = 15, face = bp_face))
+  
+}
 
+
+## Functions to calculate degree of sharedness between pairwise strain comparisons per window and generate chromosome painting plots
+## !!NOTE - These functions have been copied from '~/Talleh_code/strain_deconv_chrom_paints.Rmd'
+
+# Pf3D7_v3 nuclear chromosome sizes in bp (PlasmoDB)
+pf_chr_size <- tibble(
+  chr  = 1:14,
+  size = c(643292, 947102, 1067971, 1200490, 1343557, 1418242,
+           1445207, 1472805, 1541735, 1687656, 2038340, 2271494,
+           2925236, 3291936)
+)
+
+# Compute per-window pairwise similarity across the genome.
+#   variants : clean variants tibble (output of section 7)
+#   sids     : sample ID vector (sample_ids)
+#   wndw     : window width in bp (default 10 kb)
+#   pairs    : list of 2-element character vectors; NULL = all C(n,2) combinations
+#              e.g. list(c("0","1"), c("0","2"))
+make_chrom_windows <- function(variants, sids, wndw = 10000L, pairs = NULL) {
+  if (is.null(pairs)) pairs <- combn(sids, 2, simplify = FALSE)
+  
+  pw_base <- variants |>
+    select(chrom, pos, all_of(sids)) |>
+    mutate(chr = as.integer(str_extract(chrom, "[0-9]+(?=_v3)"))) |>
+    filter(!is.na(chr))   # drop MIT / API chromosomes
+  
+  # Per-SNP same (TRUE) / different (FALSE) / uncallable (NA) for each pair
+  pair_sim <- map_dfc(pairs, \(p) {
+    x <- pw_base[[p[1]]]; y <- pw_base[[p[2]]]
+    tibble(!!paste0(p[1], "_vs_", p[2]) :=
+             case_when(!is.na(x) & !is.na(y) & x == y ~ TRUE,
+                       !is.na(x) & !is.na(y) & x != y ~ FALSE))
+  })
+  
+  bind_cols(select(pw_base, chr, pos), pair_sim) |>
+    mutate(bin_n = ceiling(pos / wndw),
+           start = (bin_n - 1L) * wndw / 1e6,   # bp → Mb
+           end   = bin_n * wndw / 1e6) |>
+    pivot_longer(names(pair_sim), names_to = "comps", values_to = "sim") |>
+    group_by(comps, chr, bin_n, start, end) |>
+    summarise(n_same = sum( sim, na.rm = TRUE),
+              n_diff = sum(!sim, na.rm = TRUE),
+              .groups = "drop") |>
+    mutate(
+      # Continuous IBS ratio: 0 = all SNPs different (black), 1 = all same (yellow).
+      # NA when no callable SNPs in a window (white background shows through).
+      sim_ratio = if_else(n_same + n_diff > 0,
+                          n_same / (n_same + n_diff),
+                          NA_real_),
+      comps = paste0("Cluster ", str_replace(comps, "_vs_", " vs ")),
+      chr   = factor(chr, levels = 1:14)
+    )
+}
+
+# Draw chromosome painting from a make_chrom_windows() result.
+#   cw           : output of make_chrom_windows()
+#   comps_filter : character vector of comparison labels to include; NULL = all
+#                  e.g. c("Cluster 0 vs 1", "Cluster 0 vs 2")
+#   ncol         : number of facet columns
+chrom_paintr <- function(cw, comps_filter = NULL, ncol = 2) {
+  if (!is.null(comps_filter)) cw <- filter(cw, comps %in% comps_filter)
+  
+  # Full chromosome background: all 14 chrs × all comparisons in cw.
+  # Built from pf_chr_size so every chromosome is drawn even when it has no
+  # SNPs in the window data (e.g. in a dry run covering only chr 1).
+  chr_bg <- expand_grid(
+    chr   = factor(1:14, levels = 1:14),
+    comps = unique(cw$comps)
+  ) |>
+    left_join(mutate(pf_chr_size, size_mb = size / 1e6,
+                     chr     = factor(chr, levels = 1:14)),
+              by = "chr")
+  
+  wndw_kb <- round(median((cw$end - cw$start) * 1e3))
+  
+  ggplot() +
+    geom_segment(data = chr_bg,
+                 aes(x = -0.002, xend = size_mb + 0.002, y = chr, yend = chr),
+                 linewidth = 3.2, lineend = "round", colour = "black") +
+    geom_segment(data = chr_bg,
+                 aes(x = 0, xend = size_mb, y = chr, yend = chr),
+                 linewidth = 2.5, lineend = "round", colour = "white") +
+    geom_segment(data = filter(cw, !is.na(sim_ratio)),
+                 aes(x = start, xend = end, y = chr, yend = chr, colour = sim_ratio),
+                 linewidth = 2.5) +
+    # black (0 = all different) → white (0.5) → yellow (1 = all same)
+    scale_colour_gradient2(low = "black", mid = "white", high = "#DACB7D",
+                           midpoint = 0.5, limits = c(0, 1),
+                           name = "IBS ratio\n(same / callable)",
+                           labels = scales::label_percent()) +
+    scale_y_discrete(limits = rev) +
+    facet_wrap(~comps, ncol = ncol) +
+    labs(x     = "Position (Mb)", y = "Chromosome",
+         title = sprintf("Chromosome painting — pairwise IBS in %d kb windows", wndw_kb)) +
+    theme_classic() +
+    theme(strip.text      = element_text(size = 9, face = "bold"),
+          axis.text       = element_text(size = 8),
+          legend.position = "right")
+}
 

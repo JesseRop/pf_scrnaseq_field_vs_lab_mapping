@@ -7,10 +7,10 @@ library(RColorBrewer)
 # strain_cols_n <-c("#910000", "#ff1a8d", "#007c71", "#0ea300", "#00deca", "#9a96c7", "#5d57a4", "#a8875b","#708db3", "#c39a00", "#ffd94d", "#9770b3", "#C9E0F1", "#a40000" , "#00b7a7", "#ffcd12","lightgrey","#a40000" , "#00b7a7","#00b7a7", "#e7f1f9", "#D2C1DC", 'black', '#050301','grey','lightgrey','#ededed')
 #, 'lavender', 'lightgray', 'grey'
 
-strain_cols_n <-c("#910000", "#ff1a8d", "#007c71", "#0ea300", "#00deca", "#9a96c7", "#5d57a4", "#a8875b","#708db3", "#c39a00", "#ffd94d", "#9770b3", "#C9E0F1", "#a40000" , "#00b7a7", "#ffcd12","lightgrey","#a40000" , "darkgrey","darkgrey", "#e7f1f9", "#D2C1DC", 'black', '#050301','grey','lightgrey','#ededed',"#afe1ed")
+strain_cols_n <-c("#910000", "#ff1a8d", "#007c71", "#0ea300", "#00deca", "#9a96c7", "#5d57a4", "#a8875b","#708db3", "#c39a00", "#ffd94d", "#9770b3", "#C9E0F1", "#a40000" , "#00b7a7", "#ffcd12","lightgrey","#a40000" , "darkgrey","darkgrey", "#e7f1f9", "#D2C1DC", 'black', '#050301','grey','lightgrey','#ededed',"#afe1ed","lightgrey","lightgrey")
 
 
-strain_nms <- c('SC2', 'SC1','SC5',  'SC4', 'SC3',  'SC6', 'SC7', 'SC8', 'SC9', 'SC10', 'SC11', 'SC12', 'S3_b', 'S1', 'S2', 'Singlet', 'Negative', 'SC1_3i','Doublet','Dbt', 'Lab', 'Field', 'Less5', 'PoorQC', NA, 'Neg', 'Other', 'SC0')
+strain_nms <- c('SC2', 'SC1','SC5',  'SC4', 'SC3',  'SC6', 'SC7', 'SC8', 'SC9', 'SC10', 'SC11', 'SC12', 'S3_b', 'S1', 'S2', 'Singlet', 'Negative', 'SC1_3i','Doublet','Dbt', 'Lab', 'Field', 'Less5', 'PoorQC', NA, 'Neg', 'Other', 'SC0', "Missing", "Mis")
 
 names(strain_cols_n) <- strain_nms
 strain_nms_lvls <- str_sort(strain_nms, numeric = T)
@@ -26,7 +26,7 @@ strain_stg_cols_n <- c("#0110b5", "#69e095", "#d65559", "#3de4f7", "#9751e2", "#
   "#d35d6e", "#f23242", "#2f7bd8", "#e8c97a", "#a5ff89", "#a8ffc8", 
   "#83fca1", "#b0f449", "#ccfc9c", "#b75b2d", "#ce7d44", "#7ff232", 
   "#ffcdba", "#95edce", "#2727aa", "#3e529b", "#f7f972", "#ff59a6", 
-  "#1d0fe2", "#95fc7e", "#d32e3c", "#ed8e78", "#acc0ad", "#9b4788", "#afd0ad", "#9b4677", "#adf1ad", "#9f6687", "#adf1ed", "#9a6687", "#Bdf8ed", "#9a5087") %>% set_names(strain_stg_nms)
+  "#1d0fe2", "#95fc7e", "#d32e3c", "#ed8e78", "#acc0ad", "#9b4788", "#afd0ad", "#9b4677", "#adf1ad", "#9f6687", "#adf1ed", "#9a6687", "#Bdf8ed", "#9a5087", "#0120b5", "#60e005", "#d66569", "#1af2e7") %>% set_names(strain_stg_nms)
 
 dblt_cols <- c(brewer.pal(name = 'Set1', n = 8)[c(1:5,7:8)], 'lightblue')
 names(dblt_cols) <- c('ScDfSt', 'ScDf', 'ScSt', 'DfSt', 'Sc', 'Df','St', 'Singlet')
@@ -99,6 +99,7 @@ sp_fld_colors <- c('Late ring'= '#78C679',#met.brewer('Java')[2],
                    'Early schizont'='#C9E8F1',
                    'Late schizont'='#85B1D3',
                    'Gametocyte (developing)'='thistle',
+                   'Developing \ngametocyte'='thistle',
                    'early female' = '#749E89',
                    'late female'= '#4E6D58',
                    "Asexual" = "#FA8072",
@@ -147,6 +148,7 @@ sp_fld_colors2 <- c('Late ring'= '#78C679',#met.brewer('Java')[2],
                    'Early schizont'='#C9E8F1',
                    'Late schizont'='#85B1D3',
                    'Gametocyte (developing)'='thistle',
+                   'Developing \ngametocyte'='thistle',
                    'early female' = '#749E89',
                    'late female'= '#4E6D58',
                    "Asexual" = "#FA8072",
@@ -176,7 +178,7 @@ sp_fld_colors2 <- c('Late ring'= '#78C679',#met.brewer('Java')[2],
                    "Female2"   = "#1a898b",
                    "Other" = '#DCDCDC',
                    "Clean" = '#DCDCDC',
-                   " " = 'lightgrey'
+                   " " = 'lightgrey', "weak_score" = "#c9c9c9", "unclear" = "#dddddd",`discrepantFM` =  "#e5d0ff", "Missing" = '#DCDCDC'
 )
 
 sp_fld_colors3 <- c('Late ring'= '#78C679',#met.brewer('Java')[2],
@@ -346,6 +348,11 @@ Lab = "#D3D3D3", Unassigned = "#DCDCDC", `Failed QC` = "grey",
 `Gametocyte (developing)` = "#ed009d",
 `early female` = "#749E89", `late female` = "#4E6D58", Asexual = "#FF6961",
 `NULL` = "lightgrey", `Field unlabelled` = "#D2C1DC", "weak_score" = "#c9c9c9", "unclear" = "#dddddd",`discrepantFM` =  "#e5d0ff", "Schizont" = '#85B1D3')
+
+# Create abbreviated color map for plotting (short names used in figures)
+sp_col_new_abrv <- sp_fld_colors2
+names(sp_col_new_abrv) <- str_replace_all(names(sp_fld_colors2), c("discrepantFM" = "dFM", "weak_score" = "WS", "Early " = "E", "Late " = "L", "ring" = "R", "trophozoite" = "T", "Female" = "F", "Male" = "M", " \\(LE\\)" = "LE", "Gametocyte \\(developing\\)" = "Gd", "Missing" = "Mis"))
+
 
 ## Colors for the different methods for calling cells
 cell_call_mthd_col <- c("Cell" = "#FFA808", "CellCr" = "#BC60D5", "CellEd" = "#99E564", "CellCb.5"= "#93DACC", "CellCb.8" = "#DC7886", other_calls = "#FF474C", "nonCell" = 'grey', "empty_bc" = '#ededed')
